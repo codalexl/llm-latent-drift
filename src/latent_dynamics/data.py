@@ -1,11 +1,96 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Callable
 
 import numpy as np
-from datasets import Dataset, load_dataset
+from datasets import Dataset, get_dataset_config_names, get_dataset_split_names, load_dataset
+from datasets.exceptions import DatasetGenerationError
 
 from latent_dynamics.config import DATASET_REGISTRY, TOY_CONTRASTIVE, DatasetSpec
+
+
+def _streaming_to_dataset(
+    path: str,
+    config_name: str | None,
+    split_name: str,
+    max_samples: int | None,
+) -> Dataset:
+    stream = load_dataset(path, config_name, split=split_name, streaming=True)
+
+    rows: list[dict[str, Any]] = []
+    for row in stream:
+        rows.append(dict(row))
+        if max_samples is not None and len(rows) >= max_samples:
+            break
+
+    if not rows:
+        raise ValueError(
+            "Streaming fallback produced zero rows. Check dataset config/split."
+        )
+    return Dataset.from_list(rows)
+
+
+def _resolve_config_and_split(path: str, requested_split: str) -> tuple[str, str]:
+    config_names = get_dataset_config_names(path)
+    if not config_names:
+        raise ValueError(f"No dataset configs found for '{path}'.")
+
+    config_name = requested_split if requested_split in config_names else config_names[0]
+    split_names = get_dataset_split_names(path, config_name)
+    if requested_split in split_names:
+        split_name = requested_split
+    elif "train" in split_names:
+        split_name = "train"
+    else:
+        split_name = split_names[0]
+
+    if config_name != requested_split:
+        print(
+            f"Requested split='{requested_split}' is not a config for '{path}'. "
+            f"Using config='{config_name}' split='{split_name}'."
+        )
+    return config_name, split_name
+
+
+def _non_null_text_count(ds: Dataset, field: str, limit: int = 256) -> int:
+    n = min(len(ds), limit)
+    count = 0
+    for i in range(n):
+        val = ds[i].get(field)
+        if val is not None and str(val).strip() != "":
+            count += 1
+    return count
+
+
+def _resolve_text_field(spec: DatasetSpec, ds: Dataset) -> str:
+    if spec.text_field in ds.column_names:
+        return spec.text_field
+
+    candidates = [
+        "prompt",
+        "adversarial",
+        "vanilla",
+        "text",
+        "question",
+        "input",
+    ]
+    best_field: str | None = None
+    best_count = -1
+    for field in candidates:
+        if field not in ds.column_names:
+            continue
+        nn_count = _non_null_text_count(ds, field)
+        if nn_count > best_count:
+            best_count = nn_count
+            best_field = field
+
+    if best_field is None or best_count <= 0:
+        raise ValueError(
+            f"Could not resolve text field. Config has '{spec.text_field}', "
+            f"dataset columns are {ds.column_names}."
+        )
+    return best_field
 
 
 def load_examples(
@@ -18,16 +103,45 @@ def load_examples(
     if spec.loader == "toy":
         ds = Dataset.from_list(TOY_CONTRASTIVE)
     else:
-        ds_all = load_dataset(spec.path, spec.name)
-        if split not in ds_all:
-            split = next(iter(ds_all.keys()))
-            print(f"Requested split not present. Using split='{split}'.")
-        ds = ds_all[split]
+        try:
+            if spec.name is not None:
+                ds = load_dataset(spec.path, spec.name, split=split)
+            else:
+                ds = load_dataset(spec.path, split=split)
+        except ValueError as e:
+            # Some HF datasets (e.g. wildjailbreak) require a config name and
+            # use names like "train"/"eval". Resolve config and split explicitly.
+            if spec.name is None and "Config name is missing" in str(e):
+                config_name, split_name = _resolve_config_and_split(spec.path, split)
+                try:
+                    ds = load_dataset(spec.path, config_name, split=split_name)
+                except DatasetGenerationError:
+                    print(
+                        "Falling back to streaming load due dataset generation error "
+                        f"(config='{config_name}', split='{split_name}')."
+                    )
+                    ds = _streaming_to_dataset(
+                        spec.path, config_name, split_name, max_samples,
+                    )
+            else:
+                raise
+        except DatasetGenerationError:
+            print(
+                "Falling back to streaming load due dataset generation error "
+                f"(split='{split}')."
+            )
+            ds = _streaming_to_dataset(spec.path, spec.name, split, max_samples)
 
     if max_samples and len(ds) > max_samples:
         ds = ds.select(range(max_samples))
 
-    return ds, spec
+    effective_text_field = _resolve_text_field(spec, ds)
+    if effective_text_field != spec.text_field:
+        print(
+            f"Text field '{spec.text_field}' not found; using '{effective_text_field}'."
+        )
+    effective_spec = replace(spec, text_field=effective_text_field)
+    return ds, effective_spec
 
 
 def prepare_text_and_labels(
