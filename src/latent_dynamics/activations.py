@@ -4,10 +4,10 @@ import random
 
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from latent_dynamics.config import RunConfig
-
 
 # Global seeding for reproducible trajectory extraction.
 torch.manual_seed(42)
@@ -61,7 +61,7 @@ def extract_multi_layer_trajectories(
     per_layer: dict[int, list[np.ndarray]] = {li: [] for li in layer_indices}
     token_texts: list[list[str]] = []
 
-    for text in texts:
+    for text in tqdm(texts):
         inputs = tokenizer(
             text,
             return_tensors="pt",
