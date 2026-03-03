@@ -25,6 +25,7 @@ class DatasetKey(str, Enum):
     toy_contrastive = "toy_contrastive"
     wildjailbreak = "wildjailbreak"
     xstest = "xstest"
+    harmbench = "harmbench"
 
 
 class DirectionMethod(str, Enum):
@@ -78,6 +79,10 @@ def extract(
             help="Include prompt tokens in trajectory when generating.",
         ),
     ] = True,
+    load_4bit: Annotated[
+        bool,
+        typer.Option("--4bit/--no-4bit", help="Load model in 4-bit (CUDA + bitsandbytes)."),
+    ] = False,
 ) -> None:
     """Extract hidden-state trajectories from a model and dataset, save to disk.
 
@@ -132,7 +137,9 @@ def extract(
         )
 
     typer.echo(f"Loaded {len(texts)} examples, loading model...")
-    mdl, tokenizer = load_model_and_tokenizer(cfg.model_key, cfg.device)
+    mdl, tokenizer = load_model_and_tokenizer(
+        cfg.model_key, cfg.device, load_in_4bit=load_4bit
+    )
 
     typer.echo(f"Extracting trajectories for layers {layer_indices} (single forward pass)...")
     per_layer, token_texts = extract_multi_layer_trajectories(

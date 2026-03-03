@@ -9,6 +9,13 @@ from safetensors.numpy import load_file, save_file
 
 from latent_dynamics.config import RunConfig
 
+# Optional: for building HF Dataset with trajectory column
+try:
+    from datasets import Dataset as HFDataset
+    _HAS_DATASETS = True
+except Exception:
+    _HAS_DATASETS = False
+
 TRAJECTORIES_FILE = "trajectories.safetensors"
 METADATA_FILE = "metadata.json"
 
@@ -88,6 +95,50 @@ def push_to_hub(
         repo_type="dataset",
         path_in_repo=path_in_repo or "",
     )
+    return f"https://huggingface.co/datasets/{repo_id}"
+
+
+def build_trajectory_dataset(
+    prompts: list[str],
+    trajectories: list[np.ndarray],
+    labels: list[int],
+    splits: list[str],
+    completions: list[str] | None = None,
+) -> "HFDataset":
+    """Build a HuggingFace Dataset with columns: prompt, completion, trajectory, label, split.
+
+    trajectory is stored as list of lists (each row = one trajectory, list of token vectors).
+    """
+    if not _HAS_DATASETS:
+        raise ImportError("datasets library is required to build trajectory dataset.")
+    if completions is None:
+        completions = [""] * len(prompts)
+    n = len(prompts)
+    if n != len(trajectories) or n != len(labels) or n != len(splits) or n != len(completions):
+        raise ValueError("Length mismatch among prompts, trajectories, labels, splits, completions.")
+    # Store each trajectory as list of lists for Arrow compatibility.
+    traj_column = [traj.astype(np.float32).tolist() for traj in trajectories]
+    return HFDataset.from_dict({
+        "prompt": prompts,
+        "completion": completions,
+        "trajectory": traj_column,
+        "label": labels,
+        "split": splits,
+    })
+
+
+def push_trajectory_dataset_to_hub(
+    prompts: list[str],
+    trajectories: list[np.ndarray],
+    labels: list[int],
+    splits: list[str],
+    repo_id: str,
+    completions: list[str] | None = None,
+    config_name: str | None = None,
+) -> str:
+    """Build Dataset and push to HuggingFace Hub. Returns dataset URL."""
+    ds = build_trajectory_dataset(prompts, trajectories, labels, splits, completions)
+    ds.push_to_hub(repo_id, config_name=config_name or "default")
     return f"https://huggingface.co/datasets/{repo_id}"
 
 

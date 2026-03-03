@@ -14,7 +14,7 @@ def train_linear_probe(
     y: np.ndarray,
     test_size: float = 0.25,
     calib_size: float = 0.25,
-    random_state: int = 7,
+    random_state: int = 42,
 ) -> tuple[Pipeline, tuple, tuple, tuple, dict]:
     X_train_full, X_test, y_train_full, y_test = train_test_split(
         X, y,

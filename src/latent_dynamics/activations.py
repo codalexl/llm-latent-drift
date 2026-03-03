@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import random
+
 import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from latent_dynamics.config import RunConfig
+
+
+# Global seeding for reproducible trajectory extraction.
+torch.manual_seed(42)
+np.random.seed(42)
+random.seed(42)
 
 
 def generate_full_sequence(

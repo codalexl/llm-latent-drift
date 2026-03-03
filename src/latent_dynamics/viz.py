@@ -6,6 +6,19 @@ import numpy as np
 import plotly.graph_objects as go
 
 
+def _maybe_write_image(fig: go.Figure, path: Path, dpi: int = 300) -> None:
+    """Best-effort static image export (requires kaleido); always write HTML."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    html_path = path.with_suffix(".html")
+    fig.write_html(str(html_path))
+    try:
+        # Approximate DPI by scaling width/height.
+        fig.write_image(str(path.with_suffix(".png")), scale=dpi / 96.0)
+    except Exception:
+        # Static export is optional; HTML always available.
+        return
+
+
 def plot_lat_scans(
     scans: list[np.ndarray],
     labels: np.ndarray | None = None,
@@ -38,8 +51,7 @@ def plot_lat_scans(
     )
 
     if save_path is not None:
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.write_html(str(save_path.with_suffix(".html")))
+        _maybe_write_image(fig, save_path)
 
     return fig
 
@@ -76,7 +88,6 @@ def plot_drift_curves(
     )
 
     if save_path is not None:
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.write_html(str(save_path.with_suffix(".html")))
+        _maybe_write_image(fig, save_path)
 
     return fig
