@@ -1038,8 +1038,11 @@ def _select_candidates(
     for i, cand in enumerate(candidates):
         measures = np.asarray(cand.measures, dtype=np.float32)
         solution = np.asarray([float(iteration_idx), float(i)], dtype=np.float32)
+        # ribs>=0.8 expects batched inputs for add().
         state.archive.add(
-            solution=solution, objective=float(cand.q_total), measures=measures
+            solution=solution.reshape(1, -1),
+            objective=np.asarray([float(cand.q_total)], dtype=np.float32),
+            measures=measures.reshape(1, -1),
         )
 
         cell = _cell_index(cand.measures, cfg.bd_dims, state.archive_ranges)
@@ -1369,7 +1372,12 @@ def _initialize_strategy_state(
             solution = np.asarray([0.0, float(i)], dtype=np.float32)
             measures = np.asarray(cand.measures, dtype=np.float32)
             objective = float(cand.q_total)
-            archive.add(solution=solution, objective=objective, measures=measures)
+            # ribs>=0.8 expects batched inputs for add().
+            archive.add(
+                solution=solution.reshape(1, -1),
+                objective=np.asarray([objective], dtype=np.float32),
+                measures=measures.reshape(1, -1),
+            )
             cell = _cell_index(cand.measures, cfg.bd_dims, ranges)
             state.archive_cells_seen.add(cell)
         denom = float(np.prod(np.array(cfg.bd_dims, dtype=np.int64)))
