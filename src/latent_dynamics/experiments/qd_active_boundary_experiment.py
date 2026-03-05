@@ -730,6 +730,7 @@ def _make_run_cfg(cfg: ExperimentConfig) -> RunConfig:
         use_generate=True,
         max_new_tokens=cfg.max_new_tokens,
         include_prompt_in_trajectory=cfg.include_prompt_in_trajectory,
+        use_true_batch_inference=True,
     )
 
 

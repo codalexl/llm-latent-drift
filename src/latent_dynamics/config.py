@@ -25,6 +25,7 @@ class RunConfig:
     temperature: float = 0.8
     top_p: float = 0.95
     include_prompt_in_trajectory: bool = True
+    use_true_batch_inference: bool = False
 
 
 MODEL_REGISTRY: dict[str, dict[str, Any]] = {

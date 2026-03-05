@@ -15,6 +15,49 @@ np.random.seed(42)
 random.seed(42)
 
 
+def _trim_trailing_pad(ids: torch.Tensor, pad_token_id: int | None) -> torch.Tensor:
+    if ids.numel() == 0 or pad_token_id is None:
+        return ids
+    non_pad = torch.nonzero(ids != pad_token_id, as_tuple=False)
+    if non_pad.numel() == 0:
+        return ids[:0]
+    last_idx = int(non_pad[-1].item()) + 1
+    return ids[:last_idx]
+
+
+def _extract_ids_and_positions_generate(
+    seq_row: torch.Tensor,
+    prompt_mask_row: torch.Tensor,
+    prompt_len: int,
+    include_prompt: bool,
+    pad_token_id: int | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if include_prompt:
+        prompt_positions = torch.nonzero(prompt_mask_row, as_tuple=False).squeeze(-1)
+        prompt_ids = seq_row[:prompt_len].index_select(0, prompt_positions)
+        tail_ids = _trim_trailing_pad(seq_row[prompt_len:], pad_token_id)
+        if tail_ids.numel() > 0:
+            tail_positions = torch.arange(
+                prompt_len,
+                prompt_len + int(tail_ids.shape[0]),
+                device=seq_row.device,
+                dtype=torch.long,
+            )
+            ids = torch.cat([prompt_ids, tail_ids], dim=0)
+            positions = torch.cat([prompt_positions, tail_positions], dim=0)
+            return ids, positions
+        return prompt_ids, prompt_positions
+
+    ids = _trim_trailing_pad(seq_row, pad_token_id)
+    if ids.numel() > 0:
+        positions = torch.arange(int(ids.shape[0]), device=seq_row.device, dtype=torch.long)
+        return ids, positions
+
+    fallback_pos = torch.tensor([seq_row.shape[0] - 1], device=seq_row.device, dtype=torch.long)
+    fallback_ids = seq_row.index_select(0, fallback_pos)
+    return fallback_ids, fallback_pos
+
+
 def generate_full_sequence(
     model: AutoModelForCausalLM,
     input_ids: torch.Tensor,
@@ -57,9 +100,67 @@ def extract_multi_layer_trajectories(
     device: str,
     cfg: RunConfig,
 ) -> tuple[dict[int, list[np.ndarray]], list[list[str]]]:
-    """Single forward pass per example, collecting trajectories for all requested layers."""
+    """Collect trajectories for all requested layers, with optional true batched inference."""
     per_layer: dict[int, list[np.ndarray]] = {li: [] for li in layer_indices}
     token_texts: list[list[str]] = []
+
+    if cfg.use_true_batch_inference and texts:
+        inputs = tokenizer(
+            texts,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_length,
+            padding=True,
+        )
+        input_ids = inputs["input_ids"].to(device)
+        attention_mask = inputs["attention_mask"].to(device)
+
+        with torch.no_grad():
+            if cfg.use_generate:
+                seq_ids = generate_full_sequence(
+                    model,
+                    input_ids,
+                    attention_mask,
+                    cfg,
+                    tokenizer,
+                )
+                seq_attn = torch.ones_like(seq_ids, device=device)
+                out = model(
+                    input_ids=seq_ids,
+                    attention_mask=seq_attn,
+                    output_hidden_states=True,
+                )
+                prompt_len = int(input_ids.shape[1])
+                for i in range(len(texts)):
+                    ids, positions = _extract_ids_and_positions_generate(
+                        seq_row=seq_ids[i],
+                        prompt_mask_row=attention_mask[i].bool(),
+                        prompt_len=prompt_len,
+                        include_prompt=cfg.include_prompt_in_trajectory,
+                        pad_token_id=tokenizer.pad_token_id,
+                    )
+                    token_texts.append(tokenizer.convert_ids_to_tokens(ids.cpu().tolist()))
+                    for li in layer_indices:
+                        hs_row = out.hidden_states[li][i]
+                        hs = hs_row.index_select(0, positions).float().cpu().numpy()
+                        per_layer[li].append(hs)
+            else:
+                out = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                )
+                for i in range(len(texts)):
+                    positions = torch.nonzero(
+                        attention_mask[i].bool(), as_tuple=False
+                    ).squeeze(-1)
+                    ids = input_ids[i].index_select(0, positions)
+                    token_texts.append(tokenizer.convert_ids_to_tokens(ids.cpu().tolist()))
+                    for li in layer_indices:
+                        hs_row = out.hidden_states[li][i]
+                        hs = hs_row.index_select(0, positions).float().cpu().numpy()
+                        per_layer[li].append(hs)
+        return per_layer, token_texts
 
     for text in tqdm(texts):
         inputs = tokenizer(
@@ -74,7 +175,11 @@ def extract_multi_layer_trajectories(
         with torch.no_grad():
             if cfg.use_generate:
                 seq_ids = generate_full_sequence(
-                    model, input_ids, attention_mask, cfg, tokenizer,
+                    model,
+                    input_ids,
+                    attention_mask,
+                    cfg,
+                    tokenizer,
                 )
                 seq_attn = torch.ones_like(seq_ids, device=device)
                 out = model(
@@ -114,7 +219,13 @@ def extract_hidden_trajectories(
 ) -> tuple[list[np.ndarray], list[list[str]]]:
     """Convenience wrapper for a single layer."""
     per_layer, token_texts = extract_multi_layer_trajectories(
-        model, tokenizer, texts, [layer_idx], max_length, device, cfg,
+        model,
+        tokenizer,
+        texts,
+        [layer_idx],
+        max_length,
+        device,
+        cfg,
     )
     return per_layer[layer_idx], token_texts
 
