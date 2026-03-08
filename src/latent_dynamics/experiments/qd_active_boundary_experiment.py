@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
-from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss, roc_auc_score
 
@@ -79,7 +78,6 @@ class ExperimentConfig:
 
     logistic_c: float = 1.0
     logistic_max_iter: int = 2000
-    pca_components: int = 8
     boundary_margin_epsilon: float = 0.5
     target_auroc: float = 0.75
     target_brier: float = 0.20
@@ -110,7 +108,6 @@ class Candidate:
     query_index: int = 0
     z_query: np.ndarray | None = None
     z_prefix_mean: np.ndarray | None = None
-    pca_proj: np.ndarray | None = None
     psi: np.ndarray | None = None
     q_unc: float = 0.0
     q_nov: float = 0.0
@@ -124,7 +121,7 @@ class StrategyState:
     probe: "BayesianLogisticProbe"
     X: list[np.ndarray] = field(default_factory=list)
     y: list[int] = field(default_factory=list)
-    labeled_pca: list[np.ndarray] = field(default_factory=list)
+    labeled_queries: list[np.ndarray] = field(default_factory=list)
     prompt_pool: list[str] = field(default_factory=list)
     metrics_history: list[dict[str, Any]] = field(default_factory=list)
     archive: Any | None = None
@@ -419,7 +416,6 @@ def _parse_args() -> ExperimentConfig:
 
     parser.add_argument("--logistic-c", type=float, default=1.0)
     parser.add_argument("--logistic-max-iter", type=int, default=2000)
-    parser.add_argument("--pca-components", type=int, default=8)
     parser.add_argument("--boundary-margin-epsilon", type=float, default=0.5)
     parser.add_argument("--target-auroc", type=float, default=0.75)
     parser.add_argument("--target-brier", type=float, default=0.20)
@@ -471,7 +467,6 @@ def _parse_args() -> ExperimentConfig:
         bd_dims=tuple(args.bd_dims),
         logistic_c=args.logistic_c,
         logistic_max_iter=args.logistic_max_iter,
-        pca_components=args.pca_components,
         boundary_margin_epsilon=args.boundary_margin_epsilon,
         target_auroc=args.target_auroc,
         target_brier=args.target_brier,
@@ -873,27 +868,6 @@ def _rollout_candidates(
     return out
 
 
-def _fit_state_pca(states: np.ndarray, n_components: int, seed: int) -> PCA | None:
-    if states.ndim != 2 or states.shape[0] < 2:
-        return None
-    k = int(min(n_components, states.shape[0], states.shape[1]))
-    if k < 1:
-        return None
-    pca = PCA(n_components=k, random_state=seed)
-    pca.fit(states)
-    return pca
-
-
-def _project_pca(z: np.ndarray, pca: PCA | None, target_dim: int) -> np.ndarray:
-    if pca is None:
-        return np.zeros(target_dim, dtype=np.float32)
-    vec = pca.transform(z.reshape(1, -1))[0].astype(np.float32)
-    if len(vec) >= target_dim:
-        return vec[:target_dim]
-    pad = np.zeros(target_dim - len(vec), dtype=np.float32)
-    return np.concatenate([vec, pad], axis=0)
-
-
 def _build_psi(
     z_query: np.ndarray,
 ) -> np.ndarray:
@@ -904,7 +878,6 @@ def _build_psi(
 def _select_query_states(
     candidates: list[Candidate],
     probe: BayesianLogisticProbe,
-    pca: PCA | None,
     cfg: ExperimentConfig,
 ) -> None:
     for cand in candidates:
@@ -915,14 +888,12 @@ def _select_query_states(
         best_idx = max_p - 1
         best_zq = traj[best_idx]
         best_zm = traj[:max_p].mean(axis=0)
-        best_proj = _project_pca(best_zq, pca, cfg.pca_components)
         best_psi = _build_psi(best_zq)
 
         if probe.fitted_:
             for p in range(1, max_p + 1):
                 zq = traj[p - 1]
                 zm = traj[:p].mean(axis=0)
-                proj = _project_pca(zq, pca, cfg.pca_components)
                 psi = _build_psi(zq)
                 ent = float(probe.predictive_entropy(psi.reshape(1, -1))[0])
                 if ent > best_entropy:
@@ -930,13 +901,11 @@ def _select_query_states(
                     best_idx = p - 1
                     best_zq = zq
                     best_zm = zm
-                    best_proj = proj
                     best_psi = psi
 
         cand.query_index = int(best_idx)
         cand.z_query = best_zq.astype(np.float32)
         cand.z_prefix_mean = best_zm.astype(np.float32)
-        cand.pca_proj = best_proj.astype(np.float32)
         cand.psi = best_psi.astype(np.float32)
 
 
@@ -955,12 +924,12 @@ def _score_candidates(
     else:
         unc = np.full(X.shape[0], 0.5, dtype=np.float64)
 
-    if state.labeled_pca:
-        labeled = np.stack(state.labeled_pca, axis=0).astype(np.float64)
-        cand_pca = np.stack(
-            [c.pca_proj for c in candidates if c.pca_proj is not None], axis=0
+    if state.labeled_queries:
+        labeled = np.stack(state.labeled_queries, axis=0).astype(np.float64)
+        cand_queries = np.stack(
+            [c.z_query for c in candidates if c.z_query is not None], axis=0
         ).astype(np.float64)
-        dists = np.linalg.norm(cand_pca[:, None, :] - labeled[None, :, :], axis=2)
+        dists = np.linalg.norm(cand_queries[:, None, :] - labeled[None, :, :], axis=2)
         nov = dists.min(axis=1)
     else:
         nov = np.ones(X.shape[0], dtype=np.float64)
@@ -1724,7 +1693,6 @@ def _initialize_strategy_state(
     warm_candidates: list[Candidate],
     warm_labels: list[int],
     warm_judge: list[JudgeResult],
-    pca: PCA | None,
 ) -> StrategyState:
     state = StrategyState(
         name=name,
@@ -1733,11 +1701,11 @@ def _initialize_strategy_state(
     )
 
     for cand, y, _jr in zip(warm_candidates, warm_labels, warm_judge, strict=False):
-        if cand.psi is None or cand.pca_proj is None:
-            raise ValueError("Warm candidate missing psi/pca features.")
+        if cand.psi is None or cand.z_query is None:
+            raise ValueError("Warm candidate missing psi/z_query features.")
         state.X.append(cand.psi)
         state.y.append(int(y))
-        state.labeled_pca.append(cand.pca_proj)
+        state.labeled_queries.append(cand.z_query)
         state.prompt_pool.append(cand.prompt)
 
     state.prompt_pool = _dedupe_keep_order(state.prompt_pool)
@@ -1777,7 +1745,6 @@ def _prepare_heldout_candidates(
     tokenizer: Any,
     run_cfg: RunConfig,
     cfg: ExperimentConfig,
-    pca: PCA | None,
 ) -> list[Candidate]:
     rows = [(p, "heldout", None) for p in heldout_prompts]
     cands = _rollout_candidates(
@@ -1787,17 +1754,15 @@ def _prepare_heldout_candidates(
     dummy_probe = BayesianLogisticProbe(
         c=cfg.logistic_c, max_iter=cfg.logistic_max_iter
     )
-    _select_query_states(cands, dummy_probe, pca, cfg)
+    _select_query_states(cands, dummy_probe, cfg)
     for cand in cands:
         if cand.trajectory.shape[0] >= 1:
             p = min(cfg.horizon_tokens, cand.trajectory.shape[0])
             cand.query_index = p - 1
             zq = cand.trajectory[cand.query_index]
             zm = cand.trajectory[:p].mean(axis=0)
-            proj = _project_pca(zq, pca, cfg.pca_components)
             cand.z_query = zq.astype(np.float32)
             cand.z_prefix_mean = zm.astype(np.float32)
-            cand.pca_proj = proj.astype(np.float32)
             cand.psi = _build_psi(zq)
     return cands
 
@@ -1860,14 +1825,8 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
         cand.z_query = zq.astype(np.float32)
         cand.z_prefix_mean = zm.astype(np.float32)
 
-    warm_states = np.stack(
-        [c.z_query for c in warm_candidates if c.z_query is not None], axis=0
-    )
-    pca = _fit_state_pca(warm_states, cfg.pca_components, cfg.random_state)
-
     for cand in warm_candidates:
         assert cand.z_query is not None and cand.z_prefix_mean is not None
-        cand.pca_proj = _project_pca(cand.z_query, pca, cfg.pca_components)
         cand.psi = _build_psi(cand.z_query)
 
     warm_judged = _label_candidates(warm_candidates, llm, cache)
@@ -1893,7 +1852,6 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
         tokenizer,
         run_cfg,
         cfg,
-        pca,
     )
     heldout_judged = _label_candidates(heldout_candidates, llm, cache)
     heldout_label_map = {c.candidate_id: jr for c, jr in heldout_judged}
@@ -1917,7 +1875,6 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
             warm_candidates=warm_candidates,
             warm_labels=warm_labels,
             warm_judge=warm_judge,
-            pca=pca,
         )
 
     for strategy_name, state in strategies.items():
@@ -1974,7 +1931,7 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
                 cfg,
                 uid_prefix=f"{name}_it{iter_idx:03d}",
             )
-            _select_query_states(cand_pool, state.probe, pca, cfg)
+            _select_query_states(cand_pool, state.probe, cfg)
             _score_candidates(cand_pool, state, cfg)
 
             selected = _select_candidates(cand_pool, state, cfg, iteration_idx=iter_idx)
@@ -1983,10 +1940,10 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
             added_this_iter = 0
             for cand, jr in judged:
                 y = 1 if jr.unsafe else 0
-                assert cand.psi is not None and cand.pca_proj is not None
+                assert cand.psi is not None and cand.z_query is not None
                 state.X.append(cand.psi)
                 state.y.append(y)
-                state.labeled_pca.append(cand.pca_proj)
+                state.labeled_queries.append(cand.z_query)
                 state.prompt_pool.append(cand.prompt)
                 added_this_iter += 1
                 _append_jsonl(
