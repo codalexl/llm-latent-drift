@@ -392,8 +392,8 @@ def qd_active(
         typer.echo(f"Wrote report to {output_json}")
 
 
-@app.command("milestone23")
-def milestone23(
+@app.command("run-safety-pipeline")
+def run_safety_pipeline(
     activations: Annotated[
         Path,
         typer.Option(help="Local activations leaf directory for train/calib/test split."),
@@ -406,14 +406,70 @@ def milestone23(
         Path,
         typer.Option(help="Output directory for markdown/latex tables and report."),
     ] = Path("experiments/outputs"),
+    model: Annotated[
+        Optional[ModelKey],
+        typer.Option(help="Optional model key sanity check against activations metadata."),
+    ] = None,
     model_output: Annotated[
         Optional[Path],
         typer.Option(help="Optional trust-region model path (.pkl)."),
     ] = None,
+    model_path: Annotated[
+        Optional[Path],
+        typer.Option(help="Existing trust-region model path (.pkl) for --only-drift."),
+    ] = None,
+    only_fit: Annotated[
+        bool,
+        typer.Option(help="Only fit trust-region model and stop."),
+    ] = False,
+    only_drift: Annotated[
+        bool,
+        typer.Option(help="Only compute drift metrics from existing model (.pkl)."),
+    ] = False,
+    plot_drift: Annotated[
+        bool,
+        typer.Option(help="Save exit-time histogram and boundary overlay plots."),
+    ] = False,
+    real_sap: Annotated[
+        bool,
+        typer.Option(help="Run real SaP baseline by cloning/invoking SafetyPolytope."),
+    ] = False,
+    sap_repo_path: Annotated[
+        Optional[Path],
+        typer.Option(help="Optional local SaP repo path (used with --real-sap)."),
+    ] = None,
     seed: Annotated[int, typer.Option(help="Random seed for split (70/15/15).")] = 42,
 ) -> None:
-    """Run Milestones 2+3 pipeline: trust region, baselines, drift, and table exports."""
-    from latent_dynamics.experiments.m2_m3_pipeline import PipelineConfig, run_pipeline
+    """Run safety pipeline: trust region, baselines, drift, and table exports."""
+    from latent_dynamics.experiments.m2_m3_pipeline import (
+        PipelineConfig,
+        compute_drift_only,
+        fit_trust_region_only,
+        run_pipeline,
+    )
+
+    if only_fit and only_drift:
+        raise typer.BadParameter("Use only one of --only-fit or --only-drift.")
+    if only_drift and model_path is None:
+        raise typer.BadParameter("--only-drift requires --model-path.")
+
+    if only_fit:
+        report = fit_trust_region_only(
+            activations=activations,
+            model_output=model_output,
+            seed=seed,
+        )
+        typer.echo(json.dumps(report, indent=2, default=str))
+        return
+
+    if only_drift:
+        report = compute_drift_only(
+            activations=activations,
+            model_path=model_path,
+            seed=seed,
+        )
+        typer.echo(json.dumps(report, indent=2, default=str))
+        return
 
     cfg = PipelineConfig(
         activations=activations,
@@ -421,10 +477,142 @@ def milestone23(
         output_dir=output_dir,
         model_output=model_output,
         seed=seed,
+        sap_repo_path=sap_repo_path,
+        real_sap=real_sap,
+        plot_drift=plot_drift,
     )
     report = run_pipeline(cfg)
+
+    if model is not None:
+        src_model = report.get("source_config", {}).get("model_key")
+        if src_model is not None and src_model != model.value:
+            typer.echo(
+                f"Warning: provided --model={model.value} but activations model={src_model}.",
+                err=True,
+            )
+
     typer.echo(json.dumps(report, indent=2, default=str))
     typer.echo(f"Wrote report: {output_dir / 'milestone23_report.json'}")
+
+
+@app.command("fit-trust-region")
+def fit_trust_region_cmd(
+    activations: Annotated[
+        Path,
+        typer.Option(help="Local activations leaf directory."),
+    ],
+    model_output: Annotated[
+        Optional[Path],
+        typer.Option(help="Optional output path for trust-region model (.pkl)."),
+    ] = None,
+    seed: Annotated[int, typer.Option(help="Random seed for split (70/15/15).")] = 42,
+) -> None:
+    """Fit and save trust-region model only."""
+    from latent_dynamics.experiments.m2_m3_pipeline import fit_trust_region_only
+
+    report = fit_trust_region_only(
+        activations=activations,
+        model_output=model_output,
+        seed=seed,
+    )
+    typer.echo(json.dumps(report, indent=2, default=str))
+
+
+@app.command("compute-drift")
+def compute_drift_cmd(
+    activations: Annotated[
+        Path,
+        typer.Option(help="Local activations leaf directory."),
+    ],
+    model_path: Annotated[
+        Path,
+        typer.Option(help="Path to trust-region model (.pkl)."),
+    ],
+    output_json: Annotated[
+        Optional[Path],
+        typer.Option(help="Optional output JSON path for drift report."),
+    ] = None,
+    seed: Annotated[int, typer.Option(help="Random seed for split (70/15/15).")] = 42,
+) -> None:
+    """Compute drift metrics from existing trust-region model."""
+    from latent_dynamics.experiments.m2_m3_pipeline import compute_drift_only
+
+    report = compute_drift_only(
+        activations=activations,
+        model_path=model_path,
+        seed=seed,
+    )
+    text = json.dumps(report, indent=2, default=str)
+    typer.echo(text)
+    if output_json is not None:
+        output_json.parent.mkdir(parents=True, exist_ok=True)
+        output_json.write_text(text)
+        typer.echo(f"Wrote report to {output_json}")
+
+
+@app.command("milestone23")
+def milestone23_backward_compat(
+    activations: Annotated[
+        Path,
+        typer.Option(help="Local activations leaf directory for train/calib/test split."),
+    ],
+    shifted_activations: Annotated[
+        Optional[Path],
+        typer.Option(help="Optional shifted-domain activations for generator-shift AUROC."),
+    ] = None,
+    output_dir: Annotated[
+        Path,
+        typer.Option(help="Output directory for markdown/latex tables and report."),
+    ] = Path("experiments/outputs"),
+    model: Annotated[
+        Optional[ModelKey],
+        typer.Option(help="Optional model key sanity check against activations metadata."),
+    ] = None,
+    model_output: Annotated[
+        Optional[Path],
+        typer.Option(help="Optional trust-region model path (.pkl)."),
+    ] = None,
+    model_path: Annotated[
+        Optional[Path],
+        typer.Option(help="Existing trust-region model path (.pkl) for --only-drift."),
+    ] = None,
+    only_fit: Annotated[
+        bool,
+        typer.Option(help="Only fit trust-region model and stop."),
+    ] = False,
+    only_drift: Annotated[
+        bool,
+        typer.Option(help="Only compute drift metrics from existing model (.pkl)."),
+    ] = False,
+    plot_drift: Annotated[
+        bool,
+        typer.Option(help="Save exit-time histogram and boundary overlay plots."),
+    ] = False,
+    real_sap: Annotated[
+        bool,
+        typer.Option(help="Run real SaP baseline by cloning/invoking SafetyPolytope."),
+    ] = False,
+    sap_repo_path: Annotated[
+        Optional[Path],
+        typer.Option(help="Optional local SaP repo path for external baseline run."),
+    ] = None,
+    seed: Annotated[int, typer.Option(help="Random seed for split (70/15/15).")] = 42,
+) -> None:
+    """Backward-compatible alias for run-safety-pipeline."""
+    run_safety_pipeline(
+        activations=activations,
+        shifted_activations=shifted_activations,
+        output_dir=output_dir,
+        model=model,
+        model_output=model_output,
+        model_path=model_path,
+        only_fit=only_fit,
+        only_drift=only_drift,
+        plot_drift=plot_drift,
+        real_sap=real_sap,
+        sap_repo_path=sap_repo_path,
+        seed=seed,
+    )
 
 
 @app.command()
