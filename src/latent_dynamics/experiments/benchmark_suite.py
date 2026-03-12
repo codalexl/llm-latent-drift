@@ -46,7 +46,7 @@ class BenchmarkConfig:
     split: str = "train"
     layers: list[int] | None = None
     max_samples: int = 160
-    max_length: int = 256
+    max_input_tokens: int = 256
     use_generate: bool = False
     max_new_tokens: int = 24
     include_prompt_in_trajectory: bool = True
@@ -135,7 +135,7 @@ def _parse_args() -> BenchmarkConfig:
         split=args.split,
         layers=list(args.layers),
         max_samples=args.max_samples,
-        max_length=args.max_length,
+        max_input_tokens=args.max_input_tokens,
         use_generate=args.use_generate,
         max_new_tokens=args.max_new_tokens,
         include_prompt_in_trajectory=(not args.no_include_prompt),
@@ -604,7 +604,7 @@ def _ensure_layer_paths(cfg: BenchmarkConfig) -> dict[int, Path]:
         dataset_key=cfg.dataset_key,
         split=cfg.split,
         max_samples=cfg.max_samples,
-        max_length=cfg.max_length,
+        max_input_tokens=cfg.max_input_tokens,
         layer_idx=layers[0],
         device=resolve_device(cfg.device),
         use_generate=cfg.use_generate,
@@ -638,7 +638,11 @@ def _ensure_layer_paths(cfg: BenchmarkConfig) -> dict[int, Path]:
                 "Example: --judge-model gpt-4o-mini"
             )
         run_cfg = RunConfig(
-            **{**run_cfg.__dict__, "use_generate": True, "max_new_tokens": cfg.judge_max_new_tokens}
+            **{
+                **run_cfg.__dict__,
+                "use_generate": True,
+                "max_new_tokens": cfg.judge_max_new_tokens,
+            }
         )
     elif cfg.judge_model is not None:
         print(
@@ -656,7 +660,7 @@ def _ensure_layer_paths(cfg: BenchmarkConfig) -> dict[int, Path]:
         tokenizer=tokenizer,
         texts=texts,
         layer_indices=layers,
-        max_length=run_cfg.max_length,
+        max_input_tokens=run_cfg.max_input_tokens,
         device=run_cfg.device or "cpu",
         cfg=run_cfg,
     )
@@ -665,9 +669,7 @@ def _ensure_layer_paths(cfg: BenchmarkConfig) -> dict[int, Path]:
         # token_texts[i] holds the generated tokens (prompt excluded because
         # include_prompt_in_trajectory=False). Decode them as the completion and
         # judge against the original prompt — no second generation needed.
-        completions = [
-            tokenizer.convert_tokens_to_string(toks) for toks in token_texts
-        ]
+        completions = [tokenizer.convert_tokens_to_string(toks) for toks in token_texts]
         labels = _judge_completions(texts, completions, cfg)
         print(
             f"Judge labels: {int(labels.sum())} unsafe / "

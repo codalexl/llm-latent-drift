@@ -27,7 +27,7 @@ class ExperimentConfig:
     split: str = "train"
     layer_idx: int = 5
     max_samples: int = 120
-    max_length: int = 256
+    max_input_tokens: int = 256
     use_generate: bool = False
     max_new_tokens: int = 24
     include_prompt_in_trajectory: bool = True
@@ -148,7 +148,7 @@ def _prepare_trajectories(cfg: ExperimentConfig) -> tuple[list[np.ndarray], RunC
         dataset_key=cfg.dataset_key,
         split=cfg.split,
         max_samples=cfg.max_samples,
-        max_length=cfg.max_length,
+        max_input_tokens=cfg.max_input_tokens,
         layer_idx=cfg.layer_idx,
         device=resolve_device(cfg.device),
         use_generate=cfg.use_generate,
@@ -171,7 +171,7 @@ def _prepare_trajectories(cfg: ExperimentConfig) -> tuple[list[np.ndarray], RunC
         tokenizer=tokenizer,
         texts=texts,
         layer_idx=run_cfg.layer_idx,
-        max_length=run_cfg.max_length,
+        max_input_tokens=run_cfg.max_input_tokens,
         device=run_cfg.device or "cpu",
         cfg=run_cfg,
     )
@@ -379,7 +379,7 @@ def _parse_args() -> ExperimentConfig:
         split=args.split,
         layer_idx=args.layer_idx,
         max_samples=args.max_samples,
-        max_length=args.max_length,
+        max_input_tokens=args.max_input_tokens,
         use_generate=args.use_generate,
         max_new_tokens=args.max_new_tokens,
         include_prompt_in_trajectory=(not args.no_include_prompt),

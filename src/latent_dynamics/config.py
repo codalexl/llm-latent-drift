@@ -10,7 +10,7 @@ class RunConfig:
     dataset_key: str = "toy_contrastive"
     split: str = "train"
     max_samples: int = 120
-    max_length: int = 256
+    max_input_tokens: int = 256
     layer_idx: int = 5
     pooling: str = "last"  # last | mean | max_norm
     direction_method: str = "probe_weight"  # probe_weight | mean_diff | pca
@@ -21,8 +21,8 @@ class RunConfig:
 
     use_generate: bool = False
     max_new_tokens: int = 24
-    do_sample: bool = False
-    temperature: float = 0.8
+    do_sample: bool = True
+    temperature: float = 0.6
     top_p: float = 0.95
     include_prompt_in_trajectory: bool = True
     use_true_batch_inference: bool = False

@@ -55,11 +55,14 @@ def extract(
         typer.Option(help="Layer index (repeat for multiple: --layer 5 --layer 10)."),
     ] = None,
     max_samples: Annotated[int, typer.Option(help="Maximum number of examples.")] = 120,
-    max_length: Annotated[
+    max_input_tokens: Annotated[
         int, typer.Option(help="Maximum token sequence length.")
     ] = 256,
     output: Annotated[
-        Path, typer.Option(help="Root output directory. Activations are saved under {dataset}/{split}/{model}/layer_{N}/.")
+        Path,
+        typer.Option(
+            help="Root output directory. Activations are saved under {dataset}/{split}/{model}/layer_{N}/."
+        ),
     ] = Path("./activations"),
     push_to_hub: Annotated[
         Optional[str], typer.Option(help="HuggingFace Hub repo id (e.g. user/repo).")
@@ -82,7 +85,9 @@ def extract(
     ] = True,
     load_4bit: Annotated[
         bool,
-        typer.Option("--4bit/--no-4bit", help="Load model in 4-bit (CUDA + bitsandbytes)."),
+        typer.Option(
+            "--4bit/--no-4bit", help="Load model in 4-bit (CUDA + bitsandbytes)."
+        ),
     ] = False,
 ) -> None:
     """Extract hidden-state trajectories from a model and dataset, save to disk.
@@ -96,8 +101,10 @@ def extract(
     from latent_dynamics.data import load_examples, prepare_text_and_labels
     from latent_dynamics.hub import (
         activation_subpath,
-        push_to_hub as _push,
         save_activations,
+    )
+    from latent_dynamics.hub import (
+        push_to_hub as _push,
     )
     from latent_dynamics.models import load_model_and_tokenizer, resolve_device
 
@@ -108,7 +115,7 @@ def extract(
         dataset_key=dataset.value,
         split=split,
         max_samples=max_samples,
-        max_length=max_length,
+        max_input_tokens=max_input_tokens,
         layer_idx=layer_indices[0],
         device=resolve_device(device),
         use_generate=use_generate,
@@ -142,11 +149,15 @@ def extract(
         cfg.model_key, cfg.device, load_in_4bit=load_4bit
     )
 
-    typer.echo(f"Extracting trajectories for layers {layer_indices} (single forward pass)...")
+    typer.echo(
+        f"Extracting trajectories for layers {layer_indices} (single forward pass)..."
+    )
     per_layer, token_texts = extract_multi_layer_trajectories(
-        mdl, tokenizer, texts,
+        mdl,
+        tokenizer,
+        texts,
         layer_indices=layer_indices,
-        max_length=cfg.max_length,
+        max_input_tokens=cfg.max_input_tokens,
         device=cfg.device,
         cfg=cfg,
     )
@@ -156,7 +167,9 @@ def extract(
         sub = activation_subpath(cfg.dataset_key, cfg.split, cfg.model_key, li)
         layer_dir = output / sub
         layer_cfg = RunConfig(**{**cfg.__dict__, "layer_idx": li})
-        save_activations(layer_dir, per_layer[li], texts, labels, token_texts, layer_cfg)
+        save_activations(
+            layer_dir, per_layer[li], texts, labels, token_texts, layer_cfg
+        )
         typer.echo(f"  Saved layer {li} -> {layer_dir}")
 
     if push_to_hub:
@@ -168,7 +181,9 @@ def extract(
 def analyze(
     activations: Annotated[
         Optional[Path],
-        typer.Option(help="Local activations directory (leaf path with metadata.json)."),
+        typer.Option(
+            help="Local activations directory (leaf path with metadata.json)."
+        ),
     ] = None,
     from_hub: Annotated[
         Optional[str],
@@ -258,7 +273,9 @@ def analyze(
     assert activations is not None
     trajectories, texts, labels, token_texts, cfg = load_activations(activations)
     typer.echo(f"Loaded {len(trajectories)} trajectories from {activations}")
-    typer.echo(f"  model={cfg.model_key}  dataset={cfg.dataset_key}  layer={cfg.layer_idx}")
+    typer.echo(
+        f"  model={cfg.model_key}  dataset={cfg.dataset_key}  layer={cfg.layer_idx}"
+    )
 
     if labels is None:
         typer.echo(
@@ -322,12 +339,16 @@ def qd_active(
     model: Annotated[
         ModelKey, typer.Option(help="Target model key for rollout latent extraction.")
     ] = ModelKey.gemma3_4b,
-    layer: Annotated[int, typer.Option(help="Layer index for latent trajectories.")] = 5,
+    layer: Annotated[
+        int, typer.Option(help="Layer index for latent trajectories.")
+    ] = 5,
     label_budget: Annotated[int, typer.Option(help="Total labeling budget.")] = 1000,
     warm_start_labels: Annotated[
         int, typer.Option(help="Initial labeled pool size before active learning.")
     ] = 128,
-    batch_size: Annotated[int, typer.Option(help="Labels acquired per iteration.")] = 32,
+    batch_size: Annotated[
+        int, typer.Option(help="Labels acquired per iteration.")
+    ] = 32,
     candidate_pool_size: Annotated[
         int, typer.Option(help="Candidate prompts generated per iteration.")
     ] = 128,
@@ -396,11 +417,15 @@ def qd_active(
 def run_safety_pipeline(
     activations: Annotated[
         Path,
-        typer.Option(help="Local activations leaf directory for train/calib/test split."),
+        typer.Option(
+            help="Local activations leaf directory for train/calib/test split."
+        ),
     ],
     shifted_activations: Annotated[
         Optional[Path],
-        typer.Option(help="Optional shifted-domain activations for generator-shift AUROC."),
+        typer.Option(
+            help="Optional shifted-domain activations for generator-shift AUROC."
+        ),
     ] = None,
     output_dir: Annotated[
         Path,
@@ -408,7 +433,9 @@ def run_safety_pipeline(
     ] = Path("experiments/outputs"),
     model: Annotated[
         Optional[ModelKey],
-        typer.Option(help="Optional model key sanity check against activations metadata."),
+        typer.Option(
+            help="Optional model key sanity check against activations metadata."
+        ),
     ] = None,
     model_output: Annotated[
         Optional[Path],
@@ -554,11 +581,15 @@ def compute_drift_cmd(
 def milestone23_backward_compat(
     activations: Annotated[
         Path,
-        typer.Option(help="Local activations leaf directory for train/calib/test split."),
+        typer.Option(
+            help="Local activations leaf directory for train/calib/test split."
+        ),
     ],
     shifted_activations: Annotated[
         Optional[Path],
-        typer.Option(help="Optional shifted-domain activations for generator-shift AUROC."),
+        typer.Option(
+            help="Optional shifted-domain activations for generator-shift AUROC."
+        ),
     ] = None,
     output_dir: Annotated[
         Path,
@@ -566,7 +597,9 @@ def milestone23_backward_compat(
     ] = Path("experiments/outputs"),
     model: Annotated[
         Optional[ModelKey],
-        typer.Option(help="Optional model key sanity check against activations metadata."),
+        typer.Option(
+            help="Optional model key sanity check against activations metadata."
+        ),
     ] = None,
     model_output: Annotated[
         Optional[Path],

@@ -50,10 +50,14 @@ def _extract_ids_and_positions_generate(
 
     ids = _trim_trailing_pad(seq_row, pad_token_id)
     if ids.numel() > 0:
-        positions = torch.arange(int(ids.shape[0]), device=seq_row.device, dtype=torch.long)
+        positions = torch.arange(
+            int(ids.shape[0]), device=seq_row.device, dtype=torch.long
+        )
         return ids, positions
 
-    fallback_pos = torch.tensor([seq_row.shape[0] - 1], device=seq_row.device, dtype=torch.long)
+    fallback_pos = torch.tensor(
+        [seq_row.shape[0] - 1], device=seq_row.device, dtype=torch.long
+    )
     fallback_ids = seq_row.index_select(0, fallback_pos)
     return fallback_ids, fallback_pos
 
@@ -96,7 +100,7 @@ def extract_multi_layer_trajectories(
     tokenizer: AutoTokenizer,
     texts: list[str],
     layer_indices: list[int],
-    max_length: int,
+    max_input_tokens: int,
     device: str,
     cfg: RunConfig,
 ) -> tuple[dict[int, list[np.ndarray]], list[list[str]]]:
@@ -109,7 +113,7 @@ def extract_multi_layer_trajectories(
             texts,
             return_tensors="pt",
             truncation=True,
-            max_length=max_length,
+            max_input_tokens=max_input_tokens,
             padding=True,
         )
         input_ids = inputs["input_ids"].to(device)
@@ -139,7 +143,9 @@ def extract_multi_layer_trajectories(
                         include_prompt=cfg.include_prompt_in_trajectory,
                         pad_token_id=tokenizer.pad_token_id,
                     )
-                    token_texts.append(tokenizer.convert_ids_to_tokens(ids.cpu().tolist()))
+                    token_texts.append(
+                        tokenizer.convert_ids_to_tokens(ids.cpu().tolist())
+                    )
                     for li in layer_indices:
                         hs_row = out.hidden_states[li][i]
                         hs = hs_row.index_select(0, positions).float().cpu().numpy()
@@ -155,7 +161,9 @@ def extract_multi_layer_trajectories(
                         attention_mask[i].bool(), as_tuple=False
                     ).squeeze(-1)
                     ids = input_ids[i].index_select(0, positions)
-                    token_texts.append(tokenizer.convert_ids_to_tokens(ids.cpu().tolist()))
+                    token_texts.append(
+                        tokenizer.convert_ids_to_tokens(ids.cpu().tolist())
+                    )
                     for li in layer_indices:
                         hs_row = out.hidden_states[li][i]
                         hs = hs_row.index_select(0, positions).float().cpu().numpy()
@@ -167,7 +175,7 @@ def extract_multi_layer_trajectories(
             text,
             return_tensors="pt",
             truncation=True,
-            max_length=max_length,
+            max_input_tokens=max_input_tokens,
         )
         input_ids = inputs["input_ids"].to(device)
         attention_mask = inputs["attention_mask"].to(device)
@@ -213,7 +221,7 @@ def extract_hidden_trajectories(
     tokenizer: AutoTokenizer,
     texts: list[str],
     layer_idx: int,
-    max_length: int,
+    max_input_tokens: int,
     device: str,
     cfg: RunConfig,
 ) -> tuple[list[np.ndarray], list[list[str]]]:
@@ -223,7 +231,7 @@ def extract_hidden_trajectories(
         tokenizer,
         texts,
         [layer_idx],
-        max_length,
+        max_input_tokens,
         device,
         cfg,
     )

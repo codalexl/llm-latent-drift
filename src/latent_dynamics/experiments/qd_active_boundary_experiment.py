@@ -21,11 +21,13 @@ from latent_dynamics.judge import (
     JudgeResult,
     SafetyJudge,
     _chunk_starts,
+    _extract_response_text,
     _iter_with_progress,
     _run_async,
-    _extract_response_text,
     judge_cache_key,
     judge_texts,
+)
+from latent_dynamics.judge import (
     stable_text_hash as _stable_text_hash,
 )
 from latent_dynamics.models import load_model_and_tokenizer, resolve_device
@@ -53,7 +55,7 @@ MUTATION_STYLES = [
 class ExperimentConfig:
     model_key: str = "gemma3_4b"
     layer_idx: int = 5
-    max_length: int = 256
+    max_input_tokens: int = 256
     max_new_tokens: int = 128
     include_prompt_in_trajectory: bool = True
     device: str | None = None
@@ -395,7 +397,7 @@ def _parse_args() -> ExperimentConfig:
     return ExperimentConfig(
         model_key=args.model_key,
         layer_idx=args.layer_idx,
-        max_length=args.max_length,
+        max_input_tokens=args.max_input_tokens,
         max_new_tokens=args.max_new_tokens,
         include_prompt_in_trajectory=(not args.no_include_prompt),
         device=args.device,
@@ -622,7 +624,7 @@ def _make_run_cfg(cfg: ExperimentConfig) -> RunConfig:
         dataset_key="toy_contrastive",
         split="train",
         max_samples=1,
-        max_length=cfg.max_length,
+        max_input_tokens=cfg.max_input_tokens,
         layer_idx=cfg.layer_idx,
         device=resolve_device(cfg.device),
         use_generate=True,
@@ -722,7 +724,7 @@ def _rollout_candidates(
             tokenizer=tokenizer,
             texts=texts,
             layer_indices=[cfg.layer_idx],
-            max_length=cfg.max_length,
+            max_input_tokens=cfg.max_input_tokens,
             device=run_cfg.device or "cpu",
             cfg=run_cfg,
         )
@@ -1011,7 +1013,9 @@ def _label_candidates(
 
     if debug:
         n_cached = sum(
-            1 for c in candidates if cache.get(judge_cache_key(c.prompt, c.rollout_snippet)) is not None
+            1
+            for c in candidates
+            if cache.get(judge_cache_key(c.prompt, c.rollout_snippet)) is not None
         )
         LOGGER.debug(
             "Judge cache lookup: total=%d hits=%d misses=%d",
@@ -1817,7 +1821,9 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
         run_cfg,
         cfg,
     )
-    heldout_judged = _label_candidates(heldout_candidates, judge, cache, debug=cfg.debug)
+    heldout_judged = _label_candidates(
+        heldout_candidates, judge, cache, debug=cfg.debug
+    )
     heldout_label_map = {c.candidate_id: jr for c, jr in heldout_judged}
     heldout_y = np.array(
         [

@@ -114,7 +114,7 @@ def _parse_args() -> argparse.Namespace:
         help="Root output directory for safetensors + metadata.",
     )
     p.add_argument(
-        "--max_length",
+        "--max_input_tokens",
         type=int,
         default=256,
         help="Max token sequence length.",
@@ -150,7 +150,7 @@ def main() -> None:
         dataset_key=dataset_key,
         split="train",
         max_samples=num_samples,
-        max_length=args.max_length,
+        max_input_tokens=args.max_input_tokens,
         layer_idx=layer_list[0],
         device=device,
     )
@@ -199,7 +199,7 @@ def main() -> None:
     )
     print(f"Extracting trajectories for {n} examples, layers {layer_list}...")
     per_layer, token_texts = extract_multi_layer_trajectories(
-        model, tokenizer, texts, layer_list, cfg.max_length, device, cfg
+        model, tokenizer, texts, layer_list, cfg.max_input_tokens, device, cfg
     )
 
     # Success message with trajectory shape (first example, first layer)
