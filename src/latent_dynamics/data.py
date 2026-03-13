@@ -136,7 +136,7 @@ def prepare_text_and_labels(
 
 
 if __name__ == "__main__":
-    ds, spec = load_examples("wildjailbreak")
+    ds, spec = load_examples("wildjailbreak", max_samples=300, stratify_labels=True)
     texts, labels = prepare_text_and_labels(
         ds, spec.text_field, spec.label_field, spec.label_fn
     )

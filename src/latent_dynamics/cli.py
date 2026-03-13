@@ -158,7 +158,7 @@ def extract(
     typer.echo(f"Dataset: {cfg.dataset_key} (max_samples={cfg.max_samples})")
     typer.echo(f"Layers:  {'all' if layer_indices is None else layer_indices}")
 
-    ds, spec = load_examples(cfg.dataset_key, cfg.max_samples)
+    ds, spec = load_examples(cfg.dataset_key, cfg.max_samples, stratify_labels=True)
     texts, labels = prepare_text_and_labels(
         ds,
         text_field=spec.text_field,
