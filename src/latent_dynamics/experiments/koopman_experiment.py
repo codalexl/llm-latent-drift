@@ -156,18 +156,16 @@ def _prepare_trajectories(cfg: ExperimentConfig) -> tuple[list[np.ndarray], RunC
     )
 
     ds, spec = load_examples(run_cfg.dataset_key, run_cfg.max_samples)
-    texts, _labels = prepare_text_and_labels(
-        ds,
-        text_field=spec.text_field,
-        label_field=spec.label_field,
-        label_fn=spec.label_fn,
-    )
+    texts, _labels = prepare_text_and_labels(ds, spec)
     model, tokenizer = load_model_and_tokenizer(
         run_cfg.model_key, run_cfg.device or "cpu"
     )
     result = extract_hidden_trajectories(
-        model=model, tokenizer=tokenizer, texts=texts,
-        layer_idx=run_cfg.layer_idx, cfg=run_cfg,
+        model=model,
+        tokenizer=tokenizer,
+        texts=texts,
+        layer_idx=run_cfg.layer_idx,
+        cfg=run_cfg,
     )
     trajectories = result.per_layer[run_cfg.layer_idx]
     return trajectories, run_cfg

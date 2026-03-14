@@ -499,9 +499,7 @@ def _load_seed_prompts(cfg: ExperimentConfig) -> tuple[list[str], list[str]]:
     )
     harmful_texts, harmful_labels = prepare_text_and_labels(
         harmful_ds,
-        text_field=harmful_spec.text_field,
-        label_field=harmful_spec.label_field,
-        label_fn=harmful_spec.label_fn,
+        spec=harmful_spec,
     )
     if harmful_labels is None:
         raise ValueError("Harmful seed dataset must provide labels.")
@@ -512,9 +510,7 @@ def _load_seed_prompts(cfg: ExperimentConfig) -> tuple[list[str], list[str]]:
     )
     benign_texts, benign_labels = prepare_text_and_labels(
         benign_ds,
-        text_field=benign_spec.text_field,
-        label_field=benign_spec.label_field,
-        label_fn=benign_spec.label_fn,
+        spec=benign_spec,
     )
     if benign_labels is None:
         raise ValueError("Benign seed dataset must provide labels.")

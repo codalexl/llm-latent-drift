@@ -121,6 +121,19 @@ def _xstest_label_fn(row: dict[str, Any]) -> int:
     return int(str(row.get("label", "")).strip().lower() == "unsafe")
 
 
+def _wildjailbreak_label_fn(row: dict[str, Any]) -> int:
+    label = str(row.get("data_type", "")).strip().lower()
+    if label == "vanilla_benign":
+        return 0
+    if label == "vanilla_harmful":
+        return 1
+    if label == "adversarial_benign":
+        return 2
+    if label == "adversarial_harmful":
+        return 3
+    raise ValueError(f"Unknown label: {label}")
+
+
 @dataclass
 class DatasetSpec:
     text_field: str
@@ -138,9 +151,9 @@ DATASET_REGISTRY: dict[str, DatasetSpec] = {
     ),
     "wildjailbreak": DatasetSpec(
         path="allenai/wildjailbreak",
-        split="eval",
+        split="train",
         text_field="adversarial",
-        label_field="label",
+        label_fn=_wildjailbreak_label_fn,
     ),
     "xstest": DatasetSpec(
         path="walledai/XSTest",

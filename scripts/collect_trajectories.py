@@ -178,12 +178,7 @@ def main() -> None:
         ds = ds_full.select(range(min(num_samples, len(ds_full))))
         splits_used = ["train"] * len(ds)
 
-    texts, labels = prepare_text_and_labels(
-        ds,
-        text_field=spec.text_field,
-        label_field=spec.label_field,
-        label_fn=spec.label_fn,
-    )
+    texts, labels = prepare_text_and_labels(ds, spec)
     if not texts:
         print("No texts loaded. Check dataset and fields.", file=sys.stderr)
         sys.exit(1)
@@ -198,7 +193,11 @@ def main() -> None:
     )
     print(f"Extracting trajectories for {n} examples, layers {layer_list}...")
     result = extract_multi_layer_trajectories(
-        model, tokenizer, texts, layer_list, cfg,
+        model,
+        tokenizer,
+        texts,
+        layer_list,
+        cfg,
     )
 
     # Success message with trajectory shape (first example, first layer)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 from datasets import (
@@ -110,34 +110,80 @@ def load_examples(
     return ds, spec
 
 
-def prepare_text_and_labels(
+def _prepare_wildjailbreak_text_and_labels(
     ds: Dataset,
-    text_field: str,
-    label_field: str | None = None,
-    label_fn: Callable[[dict[str, Any]], int] | None = None,
-) -> tuple[list[str], np.ndarray | None]:
+    spec: DatasetSpec,
+    return_metadata: bool = False,
+) -> tuple[list[str], np.ndarray | None, list[dict[str, Any]] | None]:
     texts: list[str] = []
     labels: list[int] = []
+    metadata: list[dict[str, Any]] = []
+    for row in ds:
+        input_label = str(row["data_type"]).strip().lower()
+        if input_label == "vanilla_benign":
+            label = 0
+        elif input_label == "vanilla_harmful":
+            label = 1
+        elif input_label == "adversarial_benign":
+            label = 0
+        elif input_label == "adversarial_harmful":
+            label = 1
+        else:
+            raise ValueError(f"Unknown label: {input_label}")
+
+        if "vanilla" in input_label:
+            text = row["vanilla"]
+        elif "adversarial" in input_label:
+            text = row["adversarial"]
+        else:
+            raise ValueError(f"Unknown label: {input_label}")
+
+        texts.append(str(text))
+        labels.append(label)
+        metadata.append(
+            {
+                "data_type": row["data_type"],
+                "vanilla_text": row["vanilla"],
+            }
+        )
+    if return_metadata:
+        return texts, np.array(labels, dtype=np.int64), metadata
+    return texts, np.array(labels, dtype=np.int64)
+
+
+def prepare_text_and_labels(
+    ds: Dataset,
+    spec: DatasetSpec,
+    return_metadata: bool = False,
+) -> tuple[list[str], np.ndarray | None, list[dict[str, Any]] | None]:
+    if spec.path == "allenai/wildjailbreak":
+        return _prepare_wildjailbreak_text_and_labels(ds, spec, return_metadata)
+
+    texts: list[str] = []
+    labels: list[int] = []
+    metadata: list[dict[str, Any]] = []
 
     for row in ds:
-        text = row[text_field]
+        text = row[spec.text_field]
         if text is None:
-            continue
+            raise ValueError(f"Text is None for row {row}")
         texts.append(str(text))
 
-        if label_field is not None:
-            labels.append(int(row[label_field]))
-        elif label_fn is not None:
-            labels.append(int(label_fn(row)))
+        if spec.label_field is not None:
+            labels.append(int(row[spec.label_field]))
+        elif spec.label_fn is not None:
+            labels.append(int(spec.label_fn(row)))
 
     if len(labels) == 0:
         return texts, None
+
+    if return_metadata:
+        return texts, np.array(labels, dtype=np.int64), metadata
+
     return texts, np.array(labels, dtype=np.int64)
 
 
 if __name__ == "__main__":
-    ds, spec = load_examples("wildjailbreak", max_samples=300, stratify_labels=True)
-    texts, labels = prepare_text_and_labels(
-        ds, spec.text_field, spec.label_field, spec.label_fn
-    )
+    ds, spec = load_examples("wildjailbreak", max_samples=1000, stratify_labels=True)
+    texts, labels, metadata = prepare_text_and_labels(ds, spec, return_metadata=True)
     breakpoint()

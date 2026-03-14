@@ -159,12 +159,7 @@ def extract(
     typer.echo(f"Layers:  {'all' if layer_indices is None else layer_indices}")
 
     ds, spec = load_examples(cfg.dataset_key, cfg.max_samples, stratify_labels=True)
-    texts, labels = prepare_text_and_labels(
-        ds,
-        text_field=spec.text_field,
-        label_field=spec.label_field,
-        label_fn=spec.label_fn,
-    )
+    texts, labels, metadata = prepare_text_and_labels(ds, spec, return_metadata=True)
 
     if labels is None:
         typer.echo(

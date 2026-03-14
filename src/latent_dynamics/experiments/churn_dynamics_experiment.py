@@ -134,12 +134,7 @@ def _prepare_trajectories(
         include_prompt_in_trajectory=cfg.include_prompt_in_trajectory,
     )
     ds, spec = load_examples(run_cfg.dataset_key, run_cfg.max_samples)
-    texts, labels = prepare_text_and_labels(
-        ds,
-        text_field=spec.text_field,
-        label_field=spec.label_field,
-        label_fn=spec.label_fn,
-    )
+    texts, labels = prepare_text_and_labels(ds, spec)
     if labels is None:
         raise ValueError("Dataset must provide labels for safe/unsafe prediction.")
 
