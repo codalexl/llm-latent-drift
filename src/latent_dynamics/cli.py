@@ -90,7 +90,7 @@ def extract(
     ] = False,
     max_new_tokens: Annotated[
         int, typer.Option(help="Tokens to generate (requires --use-generate).")
-    ] = 128,
+    ] = 256,
     include_prompt: Annotated[
         bool,
         typer.Option(
@@ -102,6 +102,14 @@ def extract(
         bool,
         typer.Option(
             "--4bit/--no-4bit", help="Load model in 4-bit (CUDA + bitsandbytes)."
+        ),
+    ] = False,
+    use_true_batch_inference: Annotated[
+        bool,
+        typer.Option(
+            "--use-true-batch-inference",
+            help="Use true batch inference.",
+            is_flag=True,
         ),
     ] = False,
 ) -> None:
@@ -133,6 +141,9 @@ def extract(
             "--judge-generations requires --use-generate so completions exist."
         )
 
+    if use_true_batch_inference and use_generate:
+        typer.echo("Using batch inference!")
+
     layer_indices: list[int] | None = None
     if all_layers:
         layer_indices = None
@@ -151,6 +162,7 @@ def extract(
         use_generate=use_generate,
         max_new_tokens=max_new_tokens,
         include_prompt_in_trajectory=include_prompt,
+        use_true_batch_inference=use_true_batch_inference,
     )
 
     typer.echo(f"Device: {cfg.device}")
