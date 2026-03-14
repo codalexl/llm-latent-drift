@@ -25,6 +25,7 @@ dependencies = [
     "tqdm>=4.67.1",
     "transformers>=5.2.0",
     "typer>=0.15.0",
+    "matplotlib>=3.10.8",
 ]
 
 [project.scripts]

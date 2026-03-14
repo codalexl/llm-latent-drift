@@ -12,4 +12,5 @@ wheels/
 .env
 activations/
 .cache/
+.github/
 figures/
