@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, List, Optional
 
 import typer
 
@@ -51,7 +51,7 @@ def extract(
         DatasetKey, typer.Option(help="Dataset key from registry.")
     ] = DatasetKey.toy_contrastive,
     layer: Annotated[
-        list[int],
+        List[int],
         typer.Option(help="Layer index (repeat for multiple: --layer 5 --layer 10)."),
     ] = [],
     all_layers: Annotated[
