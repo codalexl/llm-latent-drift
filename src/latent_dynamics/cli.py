@@ -51,9 +51,9 @@ def extract(
         DatasetKey, typer.Option(help="Dataset key from registry.")
     ] = DatasetKey.toy_contrastive,
     layer: Annotated[
-        Optional[list[int]],
+        list[int],
         typer.Option(help="Layer index (repeat for multiple: --layer 5 --layer 10)."),
-    ] = None,
+    ] = [],
     all_layers: Annotated[
         bool,
         typer.Option("--all-layers/--no-all-layers", help="Extract all layers."),
@@ -133,6 +133,8 @@ def extract(
     --judge-generations, metadata also includes judge labels for unsafe and
     compliance/refusal.
     """
+    from tqdm.auto import tqdm
+
     from latent_dynamics.activations import extract_multi_layer_trajectories
     from latent_dynamics.config import RunConfig
     from latent_dynamics.data import load_examples, prepare_text_and_labels
@@ -153,7 +155,6 @@ def extract(
         list_trajectory_shards,
         write_trajectory_shard_manifest,
     )
-    from tqdm.auto import tqdm
 
     if judge_generations and not use_generate:
         raise typer.BadParameter(
@@ -253,9 +254,7 @@ def extract(
     judge_compliance_labels: list[int] = []
     judge_confidences: list[float] = []
     if judge_generations:
-        typer.echo(
-            f"Initializing judge ({DEFAULT_GENERATION_JUDGE_MODEL})..."
-        )
+        typer.echo(f"Initializing judge ({DEFAULT_GENERATION_JUDGE_MODEL})...")
         judge = SafetyJudge(
             model=DEFAULT_GENERATION_JUDGE_MODEL,
             max_concurrency=12,
