@@ -30,7 +30,6 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from latent_dynamics.hub import load_activations  # type: ignore[import]
-from latent_dynamics.viz import _maybe_write_image  # type: ignore[import]
 
 try:
     import umap  # type: ignore[import]
@@ -40,6 +39,16 @@ except Exception:
     HAS_UMAP = False
 
 import plotly.graph_objects as go
+
+
+def _maybe_write_image(fig: go.Figure, path: Path, dpi: int = 300) -> None:
+    """Write HTML and best-effort PNG for a figure."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.write_html(str(path.with_suffix(".html")))
+    try:
+        fig.write_image(str(path.with_suffix(".png")), scale=max(1, dpi // 100))
+    except Exception:
+        pass
 
 
 def _sanitize_for_projection(values: np.ndarray, clip_value: float = 1e3) -> np.ndarray:

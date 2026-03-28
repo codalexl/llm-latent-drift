@@ -71,15 +71,15 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default="gemma3_4b",
         choices=list(MODEL_REGISTRY.keys()),
-        help="Model key from registry (qwen3_8b, llama_3_1_8b, gemma3_4b).",
+        help="Model key from registry (qwen3_8b, gemma3_4b, gemma3_12b, …).",
     )
-    # Dataset: support xstest, wildjailbreak, harmbench, toy_contrastive
+    # Dataset keys currently in DATASET_REGISTRY.
     p.add_argument(
         "--dataset",
         type=str,
         default="toy_contrastive",
         choices=list(DATASET_REGISTRY.keys()),
-        help="Dataset key (xstest, wildjailbreak, harmbench, toy_contrastive).",
+        help="Dataset key (xstest, wildjailbreak, toy_contrastive).",
     )
     p.add_argument(
         "--num_samples",
@@ -126,6 +126,12 @@ def _parse_args() -> argparse.Namespace:
         help="Device override (cuda, mps, cpu).",
     )
     p.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for sampling/splitting.",
+    )
+    p.add_argument(
         "--use_70_15_15",
         action="store_true",
         help="Use 70/15/15 split and tag each example with train/calib/test.",
@@ -152,14 +158,15 @@ def main() -> None:
         max_input_tokens=args.max_input_tokens,
         layer_idx=layer_list[0],
         device=device,
+        random_state=args.seed,
     )
 
     # Load data: single split or 70/15/15
-    ds_full, spec = load_examples(dataset_key, max_samples=None)
+    ds_full, spec = load_examples(dataset_key, max_samples=None, seed=args.seed)
     if args.use_70_15_15 and len(ds_full) >= 3:
         from datasets import concatenate_datasets
 
-        train_ds, calib_ds, test_ds = make_70_15_15_split(ds_full, seed=42)
+        train_ds, calib_ds, test_ds = make_70_15_15_split(ds_full, seed=args.seed)
         n_train = min(int(0.7 * num_samples), len(train_ds))
         n_calib = min(max(0, int(0.15 * num_samples)), len(calib_ds))
         n_test = min(max(0, num_samples - n_train - n_calib), len(test_ds))

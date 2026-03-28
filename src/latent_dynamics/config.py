@@ -29,12 +29,28 @@ class RunConfig:
 
 
 MODEL_REGISTRY: dict[str, dict[str, Any]] = {
-    "qwen3_8b": {
-        "hf_id": "Qwen/Qwen3-8B",
+    "llama_3_1_8b": {
+        "hf_id": "meta-llama/Llama-3.1-8B-Instruct",
         "dtype": "bfloat16",
     },
-    "llama_3_1_8b": {
-        "hf_id": "meta-llama/Llama-3.1-8B",
+    "llama_3_1_70b": {
+        "hf_id": "meta-llama/Llama-3.1-70B-Instruct",
+        "dtype": "bfloat16",
+    },
+    "mistral_7b_instruct": {
+        "hf_id": "mistralai/Mistral-7B-Instruct-v0.3",
+        "dtype": "bfloat16",
+    },
+    "gemma2_9b": {
+        "hf_id": "google/gemma-2-9b-it",
+        "dtype": "bfloat16",
+    },
+    "gemma2_27b": {
+        "hf_id": "google/gemma-2-27b-it",
+        "dtype": "bfloat16",
+    },
+    "qwen3_8b": {
+        "hf_id": "Qwen/Qwen3-8B",
         "dtype": "bfloat16",
     },
     "gemma3_4b": {
@@ -54,6 +70,10 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
 # Default layer indices when not specified (plan: Llama 20, Qwen3 24, Gemma 18).
 DEFAULT_LAYERS: dict[str, int] = {
     "llama_3_1_8b": 20,
+    "llama_3_1_70b": 40,
+    "mistral_7b_instruct": 16,
+    "gemma2_9b": 20,
+    "gemma2_27b": 24,
     "qwen3_8b": 24,
     "gemma3_4b": 18,
     "gemma3_12b": 24,

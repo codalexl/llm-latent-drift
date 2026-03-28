@@ -5,7 +5,15 @@ from enum import Enum
 from pathlib import Path
 from typing import Annotated, List, Optional
 
-import numpy as np
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+else:
+    _repo_env = Path(__file__).resolve().parents[2] / ".env"
+    if _repo_env.is_file():
+        load_dotenv(_repo_env, override=False)
+
 import typer
 
 from latent_dynamics.config import DATASET_REGISTRY, MODEL_REGISTRY
@@ -20,9 +28,14 @@ DEFAULT_GENERATION_JUDGE_MODEL = "gpt-5-mini"
 
 
 class ModelKey(str, Enum):
-    qwen3_8b = "qwen3_8b"
     llama_3_1_8b = "llama_3_1_8b"
+    llama_3_1_70b = "llama_3_1_70b"
+    mistral_7b_instruct = "mistral_7b_instruct"
+    gemma2_9b = "gemma2_9b"
+    gemma2_27b = "gemma2_27b"
+    qwen3_8b = "qwen3_8b"
     gemma3_4b = "gemma3_4b"
+    gemma3_270m = "gemma3_270m"
     gemma3_12b = "gemma3_12b"
 
 
@@ -30,51 +43,6 @@ class DatasetKey(str, Enum):
     toy_contrastive = "toy_contrastive"
     wildjailbreak = "wildjailbreak"
     xstest = "xstest"
-
-
-class DirectionMethod(str, Enum):
-    probe_weight = "probe_weight"
-    mean_diff = "mean_diff"
-    pca = "pca"
-
-
-class PoolingMode(str, Enum):
-    last = "last"
-    mean = "mean"
-    max_norm = "max_norm"
-
-
-class PromptSubsetMode(str, Enum):
-    all = "all"
-    vanilla = "vanilla"
-    adversarial = "adversarial"
-
-
-class AcquisitionMode(str, Enum):
-    random = "random"
-    static_uncertainty = "static_uncertainty"
-    static_disagreement = "static_disagreement"
-    static_uncertainty_diversity = "static_uncertainty_diversity"
-    dynamic_uncertainty = "dynamic_uncertainty"
-    dynamic_disagreement = "dynamic_disagreement"
-    dynamic_uncertainty_diversity = "dynamic_uncertainty_diversity"
-
-
-class ComparisonAcquisitionMode(str, Enum):
-    all = "all"
-    random = "random"
-    static_uncertainty = "static_uncertainty"
-    static_disagreement = "static_disagreement"
-    static_uncertainty_diversity = "static_uncertainty_diversity"
-    dynamic_uncertainty = "dynamic_uncertainty"
-    dynamic_disagreement = "dynamic_disagreement"
-    dynamic_uncertainty_diversity = "dynamic_uncertainty_diversity"
-
-
-class EnsembleMode(str, Enum):
-    single_layer = "single_layer"
-    mean_score = "mean_score"
-    majority_vote = "majority_vote"
 
 
 @app.command()
@@ -230,7 +198,12 @@ def extract(
         f"(batch_size={cfg.inference_batch_size})"
     )
 
-    ds, spec = load_examples(cfg.dataset_key, cfg.max_samples, stratify_labels=True)
+    ds, spec = load_examples(
+        cfg.dataset_key,
+        cfg.max_samples,
+        stratify_labels=True,
+        seed=cfg.random_state,
+    )
     texts, labels, metadata = prepare_text_and_labels(ds, spec, return_metadata=True)
 
     if labels is None:
@@ -380,676 +353,11 @@ def extract(
         typer.echo(f"Pushed to {url}")
 
 
-@app.command("run-active-learning")
-def run_active_learning_cmd(
-    activations_root: Annotated[
-        Path,
-        typer.Option(
-            help=(
-                "Activation root or layer leaf. For multi-layer runs, point to a "
-                "directory containing layer_* subdirectories."
-            )
-        ),
-    ] = Path("activations/wildjailbreak/gemma3_4b"),
-    layer: Annotated[
-        List[int],
-        typer.Option(
-            help="Layer index (repeat for multiple layers: --layer 7 --layer 34)."
-        ),
-    ] = [],
-    pooling: Annotated[
-        PoolingMode,
-        typer.Option(help="Token pooling method for trajectory -> feature vector."),
-    ] = PoolingMode.last,
-    label_field: Annotated[
-        str,
-        typer.Option(
-            help=(
-                "Metadata label field to train against "
-                "(default: judge_unsafe_labels). "
-                "Use 'auto' to try judge_unsafe_labels, labels, then judge_compliance_labels."
-            )
-        ),
-    ] = "judge_unsafe_labels",
-    prompt_subset: Annotated[
-        PromptSubsetMode,
-        typer.Option(
-            help=(
-                "Limit examples by prompt group from metadata example_metadata.data_type. "
-                "Use all, vanilla, or adversarial."
-            )
-        ),
-    ] = PromptSubsetMode.all,
-    train_prompt_subset: Annotated[
-        PromptSubsetMode,
-        typer.Option(
-            help=(
-                "Subset used for train+pool split construction (L_0 and U_0). "
-                "Applied after --prompt-subset filtering."
-            )
-        ),
-    ] = PromptSubsetMode.all,
-    test_prompt_subset: Annotated[
-        PromptSubsetMode,
-        typer.Option(
-            help=(
-                "Subset used for final held-out test split. "
-                "Applied after --prompt-subset filtering."
-            )
-        ),
-    ] = PromptSubsetMode.all,
-    max_examples: Annotated[
-        Optional[int],
-        typer.Option(
-            help="Optional cap on number of examples (uses first N examples)."
-        ),
-    ] = None,
-    acquisition: Annotated[
-        AcquisitionMode,
-        typer.Option(help="Acquisition strategy."),
-    ] = AcquisitionMode.dynamic_uncertainty,
-    ensemble_mode: Annotated[
-        EnsembleMode,
-        typer.Option(help="How to aggregate predictions across layers."),
-    ] = EnsembleMode.single_layer,
-    scoring_layer: Annotated[
-        Optional[int],
-        typer.Option(
-            help="Layer used for single_layer mode (defaults to first loaded layer)."
-        ),
-    ] = None,
-    initial_labeled_size: Annotated[
-        int,
-        typer.Option(help="Initial labeled set size (|L_0|)."),
-    ] = 120,
-    query_budget: Annotated[
-        int,
-        typer.Option(help="Total number of queried labels."),
-    ] = 480,
-    batch_size: Annotated[
-        int,
-        typer.Option(help="Batch size queried per round."),
-    ] = 60,
-    test_size: Annotated[
-        float,
-        typer.Option(help="Held-out test split fraction."),
-    ] = 0.2,
-    uncertainty_weight: Annotated[
-        float,
-        typer.Option(
-            help="Weight of uncertainty in uncertainty+diversity acquisition."
-        ),
-    ] = 0.5,
-    diversity_prefilter_factor: Annotated[
-        int,
-        typer.Option(
-            help="Top-(factor*batch) uncertain candidates used before diversity selection."
-        ),
-    ] = 10,
-    seed: Annotated[
-        int,
-        typer.Option(help="Random seed for splits and probe training."),
-    ] = 42,
-    output_json: Annotated[
-        Path,
-        typer.Option(help="Where to write the active-learning report JSON."),
-    ] = Path("results/active_learning_report.json"),
-) -> None:
-    """Run active learning over activation features and report test performance vs queried labels."""
-    from latent_dynamics.learning_experiment import (
-        ActiveLearningConfig,
-        load_activation_feature_bundle,
-        run_active_learning_experiment,
-    )
-
-    selected_layers = layer if layer else None
-    bundle = load_activation_feature_bundle(
-        root_or_leaf=activations_root,
-        layers=selected_layers,
-        pooling=pooling.value,
-        label_field=label_field,
-        prompt_subset=prompt_subset.value,
-        max_examples=max_examples,
-    )
-    group_counts: str | None = None
-    if bundle.prompt_groups is not None:
-        unique_groups, group_sizes = np.unique(bundle.prompt_groups, return_counts=True)
-        group_counts = ", ".join(
-            f"{str(g)}={int(c)}"
-            for g, c in zip(unique_groups.tolist(), group_sizes.tolist(), strict=False)
-        )
-    typer.echo(
-        f"Loaded activation features: n={bundle.labels.shape[0]} "
-        f"layers={bundle.layers} label_field={bundle.label_field} "
-        f"prompt_subset={bundle.prompt_subset} "
-        f"train_prompt_subset={train_prompt_subset.value} "
-        f"test_prompt_subset={test_prompt_subset.value}"
-    )
-    if group_counts is not None:
-        typer.echo(f"Prompt groups in selection: {group_counts}")
-
-    cfg = ActiveLearningConfig(
-        acquisition=acquisition.value,
-        initial_labeled_size=initial_labeled_size,
-        query_budget=query_budget,
-        batch_size=batch_size,
-        test_size=test_size,
-        random_state=seed,
-        ensemble_mode=ensemble_mode.value,
-        scoring_layer=scoring_layer,
-        uncertainty_weight=uncertainty_weight,
-        diversity_prefilter_factor=diversity_prefilter_factor,
-        train_prompt_subset=train_prompt_subset.value,
-        test_prompt_subset=test_prompt_subset.value,
-    )
-    result = run_active_learning_experiment(bundle=bundle, config=cfg)
-    payload = result.to_dict()
-
-    output_json.parent.mkdir(parents=True, exist_ok=True)
-    output_json.write_text(json.dumps(payload, indent=2))
-
-    rounds = payload["rounds"]
-    first = rounds[0]
-    last = rounds[-1]
-    typer.echo(
-        "Performance trajectory:"
-        f" queried={first['queried_labels']} acc={first['test_accuracy']:.3f} "
-        f"auroc={first['test_auroc'] if first['test_auroc'] is not None else 'n/a'}"
-    )
-    typer.echo(
-        "Final:"
-        f" queried={last['queried_labels']} acc={last['test_accuracy']:.3f} "
-        f"auroc={last['test_auroc'] if last['test_auroc'] is not None else 'n/a'}"
-    )
-    typer.echo(f"Wrote report: {output_json}")
-
-
-@app.command("compare-active-learning-acquisitions")
-def compare_active_learning_acquisitions_cmd(
-    activations_root: Annotated[
-        Path,
-        typer.Option(
-            help=(
-                "Activation root or layer leaf. For multi-layer runs, point to a "
-                "directory containing layer_* subdirectories."
-            )
-        ),
-    ] = Path("activations/wildjailbreak/gemma3_4b"),
-    layer: Annotated[
-        List[int],
-        typer.Option(
-            help="Layer index (repeat for multiple layers: --layer 7 --layer 34)."
-        ),
-    ] = [],
-    pooling: Annotated[
-        PoolingMode,
-        typer.Option(help="Token pooling method for trajectory -> feature vector."),
-    ] = PoolingMode.last,
-    label_field: Annotated[
-        str,
-        typer.Option(
-            help=(
-                "Metadata label field to train against "
-                "(default: judge_unsafe_labels). "
-                "Use 'auto' to try judge_unsafe_labels, labels, then judge_compliance_labels."
-            )
-        ),
-    ] = "judge_unsafe_labels",
-    prompt_subset: Annotated[
-        PromptSubsetMode,
-        typer.Option(
-            help=(
-                "Limit examples by prompt group from metadata example_metadata.data_type. "
-                "Use all, vanilla, or adversarial."
-            )
-        ),
-    ] = PromptSubsetMode.all,
-    train_prompt_subset: Annotated[
-        PromptSubsetMode,
-        typer.Option(
-            help=(
-                "Subset used for train+pool split construction (L_0 and U_0). "
-                "Applied after --prompt-subset filtering."
-            )
-        ),
-    ] = PromptSubsetMode.all,
-    test_prompt_subset: Annotated[
-        PromptSubsetMode,
-        typer.Option(
-            help=(
-                "Subset used for final held-out test split. "
-                "Applied after --prompt-subset filtering."
-            )
-        ),
-    ] = PromptSubsetMode.all,
-    max_examples: Annotated[
-        Optional[int],
-        typer.Option(
-            help="Optional cap on number of examples (uses first N examples)."
-        ),
-    ] = None,
-    acquisition: Annotated[
-        List[ComparisonAcquisitionMode],
-        typer.Option(
-            help=(
-                "Acquisition functions to compare. Repeat this option to add more "
-                "(e.g., --acquisition random --acquisition dynamic_uncertainty). "
-                "Use --acquisition all to include all available acquisition functions."
-            )
-        ),
-    ] = [ComparisonAcquisitionMode.all],
-    ensemble_mode: Annotated[
-        EnsembleMode,
-        typer.Option(help="How to aggregate predictions across layers."),
-    ] = EnsembleMode.single_layer,
-    scoring_layer: Annotated[
-        Optional[int],
-        typer.Option(
-            help="Layer used for single_layer mode (defaults to first loaded layer)."
-        ),
-    ] = None,
-    initial_labeled_size: Annotated[
-        int,
-        typer.Option(help="Initial labeled set size (|L_0|)."),
-    ] = 120,
-    query_budget: Annotated[
-        int,
-        typer.Option(help="Total number of queried labels."),
-    ] = 480,
-    batch_size: Annotated[
-        int,
-        typer.Option(help="Batch size queried per round."),
-    ] = 60,
-    test_size: Annotated[
-        float,
-        typer.Option(help="Held-out test split fraction."),
-    ] = 0.2,
-    uncertainty_weight: Annotated[
-        float,
-        typer.Option(
-            help="Weight of uncertainty in uncertainty+diversity acquisition."
-        ),
-    ] = 0.5,
-    diversity_prefilter_factor: Annotated[
-        int,
-        typer.Option(
-            help="Top-(factor*batch) uncertain candidates used before diversity selection."
-        ),
-    ] = 10,
-    seed: Annotated[
-        int,
-        typer.Option(help="Random seed for shared split and probe training."),
-    ] = 42,
-    num_seeds: Annotated[
-        int,
-        typer.Option(
-            help=(
-                "Number of seeds to run for aggregation. "
-                "When >1, compares each acquisition across multiple random_state values."
-            )
-        ),
-    ] = 1,
-    seed_step: Annotated[
-        int,
-        typer.Option(
-            help=(
-                "Step between seeds when --num-seeds > 1. "
-                "Seed list is: seed + i*seed_step."
-            )
-        ),
-    ] = 1,
-    output_json: Annotated[
-        Path,
-        typer.Option(help="Where to write the acquisition-comparison report JSON."),
-    ] = Path("results/active_learning_acquisition_comparison.json"),
-) -> None:
-    """Compare acquisition functions with a shared initial labeled set/pool/test split."""
-    from latent_dynamics.learning_experiment import (
-        ActiveLearningConfig,
-        compare_acquisition_functions,
-        compare_acquisition_functions_multi_seed,
-        load_activation_feature_bundle,
-    )
-
-    selected_layers = layer if layer else None
-    bundle = load_activation_feature_bundle(
-        root_or_leaf=activations_root,
-        layers=selected_layers,
-        pooling=pooling.value,
-        label_field=label_field,
-        prompt_subset=prompt_subset.value,
-        max_examples=max_examples,
-    )
-    group_counts: str | None = None
-    if bundle.prompt_groups is not None:
-        unique_groups, group_sizes = np.unique(bundle.prompt_groups, return_counts=True)
-        group_counts = ", ".join(
-            f"{str(g)}={int(c)}"
-            for g, c in zip(unique_groups.tolist(), group_sizes.tolist(), strict=False)
-        )
-    all_acquisitions = [
-        AcquisitionMode.random.value,
-        AcquisitionMode.static_uncertainty.value,
-        AcquisitionMode.static_disagreement.value,
-        AcquisitionMode.static_uncertainty_diversity.value,
-        AcquisitionMode.dynamic_uncertainty.value,
-        AcquisitionMode.dynamic_disagreement.value,
-        AcquisitionMode.dynamic_uncertainty_diversity.value,
-    ]
-    requested = [item.value for item in acquisition]
-    if ComparisonAcquisitionMode.all.value in requested:
-        acquisitions = all_acquisitions
-    else:
-        acquisitions = []
-        for item in requested:
-            if item not in acquisitions:
-                acquisitions.append(item)
-    typer.echo(
-        f"Loaded activation features: n={bundle.labels.shape[0]} "
-        f"layers={bundle.layers} label_field={bundle.label_field} "
-        f"prompt_subset={bundle.prompt_subset} "
-        f"train_prompt_subset={train_prompt_subset.value} "
-        f"test_prompt_subset={test_prompt_subset.value}"
-    )
-    if group_counts is not None:
-        typer.echo(f"Prompt groups in selection: {group_counts}")
-    typer.echo(f"Comparing acquisitions on one shared split: {acquisitions}")
-    if num_seeds < 1:
-        raise typer.BadParameter("--num-seeds must be >= 1.")
-    if seed_step <= 0:
-        raise typer.BadParameter("--seed-step must be >= 1.")
-
-    base_cfg = ActiveLearningConfig(
-        acquisition=acquisitions[0],
-        initial_labeled_size=initial_labeled_size,
-        query_budget=query_budget,
-        batch_size=batch_size,
-        test_size=test_size,
-        random_state=seed,
-        ensemble_mode=ensemble_mode.value,
-        scoring_layer=scoring_layer,
-        uncertainty_weight=uncertainty_weight,
-        diversity_prefilter_factor=diversity_prefilter_factor,
-        train_prompt_subset=train_prompt_subset.value,
-        test_prompt_subset=test_prompt_subset.value,
-    )
-    if num_seeds == 1:
-        comparison = compare_acquisition_functions(
-            bundle=bundle,
-            base_config=base_cfg,
-            acquisitions=acquisitions,
-        )
-        payload = comparison.to_dict()
-    else:
-        seeds = [seed + (i * seed_step) for i in range(num_seeds)]
-        typer.echo(f"Running multi-seed comparison across seeds: {seeds}")
-        comparison = compare_acquisition_functions_multi_seed(
-            bundle=bundle,
-            base_config=base_cfg,
-            acquisitions=acquisitions,
-            seeds=seeds,
-        )
-        payload = comparison.to_dict()
-
-    output_json.parent.mkdir(parents=True, exist_ok=True)
-    output_json.write_text(json.dumps(payload, indent=2))
-
-    if num_seeds == 1:
-        for acq in payload["acquisitions"]:
-            metrics = payload["summary"][acq]
-            aulc_acc = metrics.get("aulc_test_accuracy_normalized")
-            aulc_auc = metrics.get("aulc_test_auroc_normalized")
-            typer.echo(
-                f"{acq}: queried={metrics['final_queried_labels']} "
-                f"acc={metrics['final_test_accuracy']:.3f} "
-                f"auroc={metrics['final_test_auroc'] if metrics['final_test_auroc'] is not None else 'n/a'} "
-                f"aulc_acc={f'{aulc_acc:.3f}' if aulc_acc is not None else 'n/a'} "
-                f"aulc_auroc={f'{aulc_auc:.3f}' if aulc_auc is not None else 'n/a'}"
-            )
-    else:
-        for acq in payload["acquisitions"]:
-            metrics = payload["aggregate_final"][acq]
-            aulc = payload["aggregate_aulc"][acq]
-            acc = metrics["final_test_accuracy"]
-            auc = metrics["final_test_auroc"]
-            queried = metrics["final_queried_labels"]
-            aulc_acc = aulc["aulc_test_accuracy_normalized"]
-            aulc_auc = aulc["aulc_test_auroc_normalized"]
-            acc_text = (
-                "n/a"
-                if acc["mean"] is None
-                else f"{acc['mean']:.3f} +/- {acc['stderr']:.3f} (sd={acc['stddev']:.3f}, n={acc['support']})"
-            )
-            auc_text = (
-                "n/a"
-                if auc["mean"] is None
-                else f"{auc['mean']:.3f} +/- {auc['stderr']:.3f} (sd={auc['stddev']:.3f}, n={auc['support']})"
-            )
-            queried_text = (
-                "n/a"
-                if queried["mean"] is None
-                else f"{queried['mean']:.1f} (sd={queried['stddev']:.2f}, n={queried['support']})"
-            )
-            aulc_acc_text = (
-                "n/a"
-                if aulc_acc["mean"] is None
-                else f"{aulc_acc['mean']:.3f} +/- {aulc_acc['stderr']:.3f} (sd={aulc_acc['stddev']:.3f}, n={aulc_acc['support']})"
-            )
-            aulc_auc_text = (
-                "n/a"
-                if aulc_auc["mean"] is None
-                else f"{aulc_auc['mean']:.3f} +/- {aulc_auc['stderr']:.3f} (sd={aulc_auc['stddev']:.3f}, n={aulc_auc['support']})"
-            )
-            typer.echo(
-                f"{acq}: queried={queried_text} "
-                f"acc={acc_text} "
-                f"auroc={auc_text} "
-                f"aulc_acc={aulc_acc_text} "
-                f"aulc_auroc={aulc_auc_text}"
-            )
-    typer.echo(f"Wrote report: {output_json}")
-
-
-@app.command("plot-active-learning-figures")
-def plot_active_learning_figures_cmd(
-    comparison_json: Annotated[
-        Path,
-        typer.Option(
-            help=(
-                "Path to comparison JSON produced by compare-active-learning-acquisitions."
-            )
-        ),
-    ],
-    output_dir: Annotated[
-        Path,
-        typer.Option(help="Directory where Figure 1/2/3 files will be written."),
-    ] = Path("results/figures"),
-) -> None:
-    """Generate three high-quality figures from active-learning comparison results."""
-    from latent_dynamics.learning_experiment import generate_comparison_figures
-
-    if not comparison_json.exists():
-        raise typer.BadParameter(f"comparison_json does not exist: {comparison_json}")
-
-    outputs = generate_comparison_figures(
-        comparison_json=comparison_json,
-        output_dir=output_dir,
-    )
-    for fig_name, paths in outputs.items():
-        typer.echo(f"{fig_name}:")
-        typer.echo(f"  png: {paths['png']}")
-        typer.echo(f"  pdf: {paths['pdf']}")
-
-
-@app.command("run-safety-pipeline")
-def run_safety_pipeline(
-    activations: Annotated[
-        Path,
-        typer.Option(
-            help="Local activations leaf directory for train/calib/test split."
-        ),
-    ],
-    shifted_activations: Annotated[
-        Optional[Path],
-        typer.Option(
-            help="Optional shifted-domain activations for generator-shift AUROC."
-        ),
-    ] = None,
-    output_dir: Annotated[
-        Path,
-        typer.Option(help="Output directory for markdown/latex tables and report."),
-    ] = Path("experiments/outputs"),
-    model: Annotated[
-        Optional[ModelKey],
-        typer.Option(
-            help="Optional model key sanity check against activations metadata."
-        ),
-    ] = None,
-    model_output: Annotated[
-        Optional[Path],
-        typer.Option(help="Optional trust-region model path (.pkl)."),
-    ] = None,
-    model_path: Annotated[
-        Optional[Path],
-        typer.Option(help="Existing trust-region model path (.pkl) for --only-drift."),
-    ] = None,
-    only_fit: Annotated[
-        bool,
-        typer.Option(help="Only fit trust-region model and stop."),
-    ] = False,
-    only_drift: Annotated[
-        bool,
-        typer.Option(help="Only compute drift metrics from existing model (.pkl)."),
-    ] = False,
-    plot_drift: Annotated[
-        bool,
-        typer.Option(help="Save exit-time histogram and boundary overlay plots."),
-    ] = False,
-    real_sap: Annotated[
-        bool,
-        typer.Option(help="Run real SaP baseline by cloning/invoking SafetyPolytope."),
-    ] = False,
-    sap_repo_path: Annotated[
-        Optional[Path],
-        typer.Option(help="Optional local SaP repo path (used with --real-sap)."),
-    ] = None,
-    seed: Annotated[int, typer.Option(help="Random seed for split (70/15/15).")] = 42,
-) -> None:
-    """Run safety pipeline: trust region, baselines, drift, and table exports."""
-    from latent_dynamics.experiments.m2_m3_pipeline import (
-        PipelineConfig,
-        compute_drift_only,
-        fit_trust_region_only,
-        run_pipeline,
-    )
-
-    if only_fit and only_drift:
-        raise typer.BadParameter("Use only one of --only-fit or --only-drift.")
-    if only_drift and model_path is None:
-        raise typer.BadParameter("--only-drift requires --model-path.")
-
-    if only_fit:
-        report = fit_trust_region_only(
-            activations=activations,
-            model_output=model_output,
-            seed=seed,
-        )
-        typer.echo(json.dumps(report, indent=2, default=str))
-        return
-
-    if only_drift:
-        report = compute_drift_only(
-            activations=activations,
-            model_path=model_path,
-            seed=seed,
-        )
-        typer.echo(json.dumps(report, indent=2, default=str))
-        return
-
-    cfg = PipelineConfig(
-        activations=activations,
-        shifted_activations=shifted_activations,
-        output_dir=output_dir,
-        model_output=model_output,
-        seed=seed,
-        sap_repo_path=sap_repo_path,
-        real_sap=real_sap,
-        plot_drift=plot_drift,
-    )
-    report = run_pipeline(cfg)
-
-    if model is not None:
-        src_model = report.get("source_config", {}).get("model_key")
-        if src_model is not None and src_model != model.value:
-            typer.echo(
-                f"Warning: provided --model={model.value} but activations model={src_model}.",
-                err=True,
-            )
-
-    typer.echo(json.dumps(report, indent=2, default=str))
-    typer.echo(f"Wrote report: {output_dir / 'milestone23_report.json'}")
-
-
-@app.command("fit-trust-region")
-def fit_trust_region_cmd(
-    activations: Annotated[
-        Path,
-        typer.Option(help="Local activations leaf directory."),
-    ],
-    model_output: Annotated[
-        Optional[Path],
-        typer.Option(help="Optional output path for trust-region model (.pkl)."),
-    ] = None,
-    seed: Annotated[int, typer.Option(help="Random seed for split (70/15/15).")] = 42,
-) -> None:
-    """Fit and save trust-region model only."""
-    from latent_dynamics.experiments.m2_m3_pipeline import fit_trust_region_only
-
-    report = fit_trust_region_only(
-        activations=activations,
-        model_output=model_output,
-        seed=seed,
-    )
-    typer.echo(json.dumps(report, indent=2, default=str))
-
-
-@app.command("compute-drift")
-def compute_drift_cmd(
-    activations: Annotated[
-        Path,
-        typer.Option(help="Local activations leaf directory."),
-    ],
-    model_path: Annotated[
-        Path,
-        typer.Option(help="Path to trust-region model (.pkl)."),
-    ],
-    output_json: Annotated[
-        Optional[Path],
-        typer.Option(help="Optional output JSON path for drift report."),
-    ] = None,
-    seed: Annotated[int, typer.Option(help="Random seed for split (70/15/15).")] = 42,
-) -> None:
-    """Compute drift metrics from existing trust-region model."""
-    from latent_dynamics.experiments.m2_m3_pipeline import compute_drift_only
-
-    report = compute_drift_only(
-        activations=activations,
-        model_path=model_path,
-        seed=seed,
-    )
-    text = json.dumps(report, indent=2, default=str)
-    typer.echo(text)
-    if output_json is not None:
-        output_json.parent.mkdir(parents=True, exist_ok=True)
-        output_json.write_text(text)
-        typer.echo(f"Wrote report to {output_json}")
-
-
 @app.command("run-driftguard-session")
 def run_driftguard_session_cmd(
     model: Annotated[
         ModelKey, typer.Option(help="Model key from registry.")
-    ] = ModelKey.llama_3_1_8b,
+    ] = ModelKey.gemma3_12b,
     prompt: Annotated[
         str, typer.Option(help="Prompt to evaluate with online drift monitoring.")
     ] = "You are a helpful assistant.",
@@ -1077,6 +385,21 @@ def run_driftguard_session_cmd(
     topology_stride: Annotated[
         int, typer.Option(help="Stride for TDA snapshot updates.")
     ] = 4,
+    topology_diameter_ceiling: Annotated[
+        float, typer.Option(help="Ceiling for topology diameter risk term.")
+    ] = 1.5,
+    topology_beta1_ceiling: Annotated[
+        float, typer.Option(help="Ceiling for topology beta1 risk term.")
+    ] = 1.0,
+    continuity_weight: Annotated[
+        float, typer.Option(help="Weight for cosine continuity risk term.")
+    ] = 0.40,
+    lipschitz_weight: Annotated[
+        float, typer.Option(help="Weight for Lipschitz risk term.")
+    ] = 0.35,
+    topology_weight: Annotated[
+        float, typer.Option(help="Weight for topology risk term.")
+    ] = 0.25,
     steering_strength: Annotated[
         float, typer.Option(help="Intervention strength toward safe reference.")
     ] = 0.20,
@@ -1091,7 +414,7 @@ def run_driftguard_session_cmd(
         bool,
         typer.Option(
             "--4bit/--no-4bit",
-            help="Load nnsight model in 4-bit mode (CUDA only).",
+            help="Load model in 4-bit mode when supported (CUDA only).",
         ),
     ] = False,
     safe_reference_prompt: Annotated[
@@ -1120,7 +443,9 @@ def run_driftguard_session_cmd(
 
     resolved_device = resolve_device(device)
     mdl, tokenizer = load_model_and_tokenizer(
-        model.value, resolved_device, load_in_4bit=False
+        model.value,
+        resolved_device,
+        load_in_4bit=bool(load_4bit and resolved_device == "cuda"),
     )
     cfg = DriftGuardConfig(
         layer_idx=layer_idx,
@@ -1130,6 +455,11 @@ def run_driftguard_session_cmd(
         risk_threshold=risk_threshold,
         topology_window=topology_window,
         topology_stride=topology_stride,
+        topology_diameter_ceiling=topology_diameter_ceiling,
+        topology_beta1_ceiling=topology_beta1_ceiling,
+        continuity_weight=continuity_weight,
+        lipschitz_weight=lipschitz_weight,
+        topology_weight=topology_weight,
         steering_strength=steering_strength,
         use_nnsight=use_nnsight,
     )
@@ -1175,6 +505,9 @@ def run_driftguard_session_cmd(
         "generated_text": result.generated_text,
         "alarms": result.alarms,
         "steered_steps": result.steered_steps,
+        "first_alarm_token": result.first_alarm_token,
+        "first_alarm_lead_time": result.first_alarm_lead_time,
+        "mean_step_latency_ms": result.mean_step_latency_ms,
         "steps": [
             {
                 "token_id": s.token_id,
@@ -1186,6 +519,7 @@ def run_driftguard_session_cmd(
                 "risk_score": s.risk_score,
                 "alarm": s.alarm,
                 "steered": s.steered,
+                "latency_ms": s.latency_ms,
             }
             for s in result.steps
         ],
@@ -1196,77 +530,6 @@ def run_driftguard_session_cmd(
         output_json.parent.mkdir(parents=True, exist_ok=True)
         output_json.write_text(text)
         typer.echo(f"Wrote report to {output_json}")
-
-
-@app.command("milestone23")
-def milestone23_backward_compat(
-    activations: Annotated[
-        Path,
-        typer.Option(
-            help="Local activations leaf directory for train/calib/test split."
-        ),
-    ],
-    shifted_activations: Annotated[
-        Optional[Path],
-        typer.Option(
-            help="Optional shifted-domain activations for generator-shift AUROC."
-        ),
-    ] = None,
-    output_dir: Annotated[
-        Path,
-        typer.Option(help="Output directory for markdown/latex tables and report."),
-    ] = Path("experiments/outputs"),
-    model: Annotated[
-        Optional[ModelKey],
-        typer.Option(
-            help="Optional model key sanity check against activations metadata."
-        ),
-    ] = None,
-    model_output: Annotated[
-        Optional[Path],
-        typer.Option(help="Optional trust-region model path (.pkl)."),
-    ] = None,
-    model_path: Annotated[
-        Optional[Path],
-        typer.Option(help="Existing trust-region model path (.pkl) for --only-drift."),
-    ] = None,
-    only_fit: Annotated[
-        bool,
-        typer.Option(help="Only fit trust-region model and stop."),
-    ] = False,
-    only_drift: Annotated[
-        bool,
-        typer.Option(help="Only compute drift metrics from existing model (.pkl)."),
-    ] = False,
-    plot_drift: Annotated[
-        bool,
-        typer.Option(help="Save exit-time histogram and boundary overlay plots."),
-    ] = False,
-    real_sap: Annotated[
-        bool,
-        typer.Option(help="Run real SaP baseline by cloning/invoking SafetyPolytope."),
-    ] = False,
-    sap_repo_path: Annotated[
-        Optional[Path],
-        typer.Option(help="Optional local SaP repo path for external baseline run."),
-    ] = None,
-    seed: Annotated[int, typer.Option(help="Random seed for split (70/15/15).")] = 42,
-) -> None:
-    """Backward-compatible alias for run-safety-pipeline."""
-    run_safety_pipeline(
-        activations=activations,
-        shifted_activations=shifted_activations,
-        output_dir=output_dir,
-        model=model,
-        model_output=model_output,
-        model_path=model_path,
-        only_fit=only_fit,
-        only_drift=only_drift,
-        plot_drift=plot_drift,
-        real_sap=real_sap,
-        sap_repo_path=sap_repo_path,
-        seed=seed,
-    )
 
 
 @app.command()

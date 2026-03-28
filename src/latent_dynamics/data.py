@@ -78,6 +78,7 @@ def load_examples(
     dataset_key: str,
     max_samples: int | None = None,
     stratify_labels: bool = False,
+    seed: int = STRATIFY_SEED,
 ) -> tuple[Dataset, DatasetSpec]:
     spec = DATASET_REGISTRY[dataset_key]
 
@@ -100,10 +101,10 @@ def load_examples(
                 ds,
                 spec,
                 max_samples=max_samples,
-                seed=STRATIFY_SEED,
+                seed=seed,
             )
         else:
-            rng = np.random.default_rng(STRATIFY_SEED)
+            rng = np.random.default_rng(seed)
             indices = rng.choice(len(ds), size=max_samples, replace=False)
             ds = ds.select(indices.tolist())
 

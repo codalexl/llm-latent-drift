@@ -12,6 +12,10 @@ wheels/
 .env
 activations/
 .cache/
+.hf_cache/
 .github/
 figures/
 results/
+models/
+experiments/outputs/
+*.pkl

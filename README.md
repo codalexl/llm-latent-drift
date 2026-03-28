@@ -1,12 +1,6 @@
 # latent-dynamics
 
-Dynamic trust regions from latent representation trajectories for LLM safety monitoring.
-
-This repo now supports:
-- Milestone 1: trajectory collection + visualization
-- Milestone 2: trust-region fitting + comparative baselines
-- Milestone 3: drift metrics + generator-shift evaluation
-- DriftGuard runtime: online drift monitoring + activation steering (inference-time)
+Inference-time DriftGuard research code for hidden-state drift detection and causal activation steering on fixed LLMs.
 
 ## Setup
 
@@ -23,7 +17,7 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-## Core commands
+## Core DriftGuard Commands
 
 ### 1) Collect trajectories
 ```bash
@@ -40,92 +34,51 @@ uv run python scripts/collect_trajectories.py \
 ```bash
 uv run python scripts/visualize_trajectories.py \
   --model qwen3_8b \
-  --activations activations/xstest/train/qwen3_8b/layer_24 \
+  --activations activations/xstest/qwen3_8b/layer_24 \
   --fig_dir figures
 ```
 
-### 3) Full safety pipeline (Milestone 2 + 3)
+### 3) Run online DriftGuard session
 ```bash
-uv run latent-dynamics run-safety-pipeline \
-  --activations activations/xstest/train/qwen3_8b/layer_24 \
-  --output-dir experiments/outputs \
-  --plot-drift \
-  --seed 42
-```
-
-### Optional: real SaP baseline integration
-```bash
-uv run latent-dynamics run-safety-pipeline \
-  --activations activations/xstest/train/qwen3_8b/layer_24 \
-  --output-dir experiments/outputs \
-  --plot-drift \
-  --real-sap \
-  --sap-repo-path .cache/baselines/SafetyPolytope \
-  --seed 42
-```
-
-### Optional: shifted-domain eval
-```bash
-uv run latent-dynamics run-safety-pipeline \
-  --activations activations/xstest/train/qwen3_8b/layer_24 \
-  --shifted-activations activations/harmbench/train/qwen3_8b/layer_24 \
-  --output-dir experiments/outputs \
-  --plot-drift \
-  --seed 42
-```
-
-### Modular commands
-```bash
-uv run latent-dynamics fit-trust-region \
-  --activations activations/xstest/train/qwen3_8b/layer_24
-
-uv run latent-dynamics compute-drift \
-  --activations activations/xstest/train/qwen3_8b/layer_24 \
-  --model-path models/trust_region_qwen3_8b.pkl
-
 uv run latent-dynamics run-driftguard-session \
   --model llama_3_1_8b \
-  --prompt "Let's talk about lab safety best practices." \
-  --safe-reference-prompt "How should I safely store household chemicals?" \
-  --safe-reference-prompt "Explain responsible disclosure in cybersecurity." \
+  --prompt "Let's discuss responsible cybersecurity disclosure." \
+  --safe-reference-prompt "How do safety policies reduce misuse?" \
+  --safe-reference-prompt "Give safe guidance for lab procedures." \
+  --risk-threshold 0.5 \
   --use-nnsight
 ```
 
-## One-command run (finalization helper)
-
+### 4) DriftGuard threat preset benchmark
 ```bash
-uv run python experiments/run_all.py \
+uv run python experiments/run_driftguard_benchmark.py \
   --model gemma3_4b \
-  --dataset toy_contrastive \
-  --num-samples 20 \
-  --output-dir experiments/outputs
+  --preset multi_turn_jailbreak \
+  --quantization-sweep \
+  --output-json experiments/outputs/driftguard_benchmark.json
 ```
 
-This executes:
-1. collect trajectories
-2. visualize trajectories
-3. run-safety-pipeline
+### 5) Generate benchmark figures
+```bash
+uv run python experiments/plot_driftguard_benchmark.py \
+  --report-json experiments/outputs/driftguard_benchmark.json \
+  --activations activations/toy_contrastive/gemma3_4b/layer_18 \
+  --out-dir experiments/outputs/figures
+```
 
 ## Main outputs
 
-- `models/trust_region_{model}.pkl`
-- `experiments/outputs/milestone2_comparison.md`
-- `experiments/outputs/milestone2_comparison.tex`
-- `experiments/outputs/milestone3_drift.md`
-- `experiments/outputs/milestone3_drift.tex`
-- `experiments/outputs/milestone23_report.json`
-- `experiments/outputs/figures/` (drift histogram + boundary overlay, when `--plot-drift`)
-- `figures/` (trajectory visualizations + `captions.json`)
+- `experiments/outputs/driftguard_benchmark.json`
+- `experiments/outputs/figures/` (cosine heatmap, lead-time distribution, latency bar, optional PCA/persistence)
+- `activations/{dataset}/{model}/layer_{N}/` (trajectory shards + metadata)
 
 ## Reproducibility defaults
 
-- Global random seed defaults to 42 in core modules.
-- 70/15/15 split helpers use deterministic seed by default.
-- `--seed` is exposed on safety pipeline commands.
+- `--seed` is exposed on extraction and benchmark scripts.
+- Benchmark presets are fixed and version-controlled for repeatability.
 
 ## Notes
 
 - For static PNG export from Plotly, install `kaleido`.
 - 4-bit loading requires CUDA-compatible `bitsandbytes`.
-- Real SaP integration calls SafetyPolytope's beaver pipeline script if available.
 

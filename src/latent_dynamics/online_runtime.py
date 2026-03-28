@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from time import perf_counter
 
 from latent_dynamics.steering import steer_toward_reference, steer_with_nnsight
 from latent_dynamics.tda_metrics import topology_snapshot
@@ -21,6 +22,11 @@ class DriftGuardConfig:
     risk_threshold: float = 0.5
     topology_window: int = 24
     topology_stride: int = 4
+    topology_diameter_ceiling: float = 1.50
+    topology_beta1_ceiling: float = 1.00
+    continuity_weight: float = 0.40
+    lipschitz_weight: float = 0.35
+    topology_weight: float = 0.25
     steering_strength: float = 0.20
     use_nnsight: bool = False
     clear_cache_after_steer: bool = True
@@ -37,6 +43,7 @@ class DriftStep:
     risk_score: float
     alarm: bool
     steered: bool
+    latency_ms: float | None = None
 
 
 @dataclass
@@ -45,6 +52,9 @@ class DriftSessionResult:
     steps: list[DriftStep]
     alarms: int
     steered_steps: int
+    first_alarm_token: int | None
+    first_alarm_lead_time: int | None
+    mean_step_latency_ms: float
 
 
 def _resolve_nnsight_layer_stack(model_obj: object) -> object:
@@ -99,6 +109,48 @@ def _next_token_id(logits: torch.Tensor, do_sample: bool, temperature: float) ->
     return int(torch.multinomial(probs, num_samples=1).item())
 
 
+def _compute_risk_score(
+    cfg: DriftGuardConfig,
+    cosine: float | None,
+    lipschitz: float | None,
+    topology_diameter: float | None,
+    topology_beta1: int | None,
+) -> float:
+    continuity_risk = 0.0
+    if cosine is not None:
+        continuity_risk = max(0.0, cfg.cosine_floor - cosine) / max(
+            1.0 - cfg.cosine_floor,
+            1e-6,
+        )
+
+    lipschitz_risk = 0.0
+    if lipschitz is not None:
+        lipschitz_risk = max(0.0, lipschitz - cfg.lipschitz_ceiling) / max(
+            cfg.lipschitz_ceiling,
+            1e-6,
+        )
+
+    topology_risk = 0.0
+    if topology_diameter is not None:
+        topology_risk += max(0.0, topology_diameter - cfg.topology_diameter_ceiling) / max(
+            cfg.topology_diameter_ceiling,
+            1e-6,
+        )
+    if topology_beta1 is not None:
+        topology_risk += max(0.0, float(topology_beta1) - cfg.topology_beta1_ceiling) / max(
+            cfg.topology_beta1_ceiling,
+            1e-6,
+        )
+    topology_risk = min(topology_risk, 2.0)
+
+    score = (
+        cfg.continuity_weight * continuity_risk
+        + cfg.lipschitz_weight * lipschitz_risk
+        + cfg.topology_weight * topology_risk
+    )
+    return float(np.clip(score, 0.0, 1.5))
+
+
 def estimate_safe_reference(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
@@ -137,8 +189,10 @@ def run_driftguard_session(
     safe_reference: torch.Tensor | None = None,
 ) -> DriftSessionResult:
     encoded = tokenizer(prompt, return_tensors="pt")
-    input_ids = encoded["input_ids"].to(device)
-    attention_mask = encoded["attention_mask"].to(device)
+    full_input_ids = encoded["input_ids"].to(device)
+    full_attention_mask = encoded["attention_mask"].to(device)
+    input_ids = full_input_ids
+    attention_mask = full_attention_mask
 
     past_key_values = None
     prev_hidden: torch.Tensor | None = None
@@ -147,6 +201,7 @@ def run_driftguard_session(
     steps: list[DriftStep] = []
 
     for step_idx in range(cfg.max_new_tokens):
+        t0 = perf_counter()
         with torch.no_grad():
             out = model(
                 input_ids=input_ids,
@@ -180,21 +235,18 @@ def run_driftguard_session(
             topology_beta0 = topo.beta0
             topology_beta1 = topo.beta1
 
-        continuity_risk = 0.0
-        if cos is not None:
-            continuity_risk += max(0.0, cfg.cosine_floor - cos) / max(
-                1.0 - cfg.cosine_floor, 1e-6
-            )
-        lipschitz_risk = 0.0
-        if lip is not None:
-            lipschitz_risk = max(0.0, lip - cfg.lipschitz_ceiling) / max(
-                cfg.lipschitz_ceiling, 1e-6
-            )
-        risk_score = float(np.clip(0.5 * continuity_risk + 0.5 * lipschitz_risk, 0.0, 1.5))
+        risk_score = _compute_risk_score(
+            cfg=cfg,
+            cosine=cos,
+            lipschitz=lip,
+            topology_diameter=topology_diam,
+            topology_beta1=topology_beta1,
+        )
         alarm = risk_score >= cfg.risk_threshold
 
         logits = out.logits[:, -1, :]
         steered = False
+        cache_reset_needed = False
         if alarm and safe_reference is not None:
             steered_hidden, steering_result = steer_toward_reference(
                 hidden=hidden,
@@ -207,6 +259,7 @@ def run_driftguard_session(
             steered = steering_result.applied
             if steered and cfg.clear_cache_after_steer:
                 _maybe_clear_device_cache(device)
+                cache_reset_needed = True
 
         token_id = _next_token_id(
             logits=logits,
@@ -214,6 +267,7 @@ def run_driftguard_session(
             temperature=cfg.temperature,
         )
         generated.append(token_id)
+        latency_ms = (perf_counter() - t0) * 1000.0
         steps.append(
             DriftStep(
                 token_id=token_id,
@@ -225,6 +279,7 @@ def run_driftguard_session(
                 risk_score=risk_score,
                 alarm=alarm,
                 steered=steered,
+                latency_ms=latency_ms,
             )
         )
         prev_hidden = hidden
@@ -232,17 +287,37 @@ def run_driftguard_session(
         if token_id == tokenizer.eos_token_id:
             break
 
-        input_ids = torch.tensor([[token_id]], dtype=torch.long, device=device)
-        attention_mask = torch.ones_like(input_ids, device=device)
+        new_token = torch.tensor([[token_id]], dtype=torch.long, device=device)
+        full_input_ids = torch.cat([full_input_ids, new_token], dim=1)
+        full_attention_mask = torch.cat(
+            [full_attention_mask, torch.ones_like(new_token, device=device)],
+            dim=1,
+        )
+        if cache_reset_needed:
+            # Recompute from full prefix after steering to avoid stale cache state.
+            past_key_values = None
+            input_ids = full_input_ids
+            attention_mask = full_attention_mask
+        else:
+            input_ids = new_token
+            attention_mask = torch.ones_like(new_token, device=device)
 
     generated_text = tokenizer.decode(generated, skip_special_tokens=True)
     alarms = sum(1 for s in steps if s.alarm)
     steered_steps = sum(1 for s in steps if s.steered)
+    first_alarm = next((i for i, s in enumerate(steps) if s.alarm), None)
+    first_alarm_lead = None
+    if first_alarm is not None:
+        first_alarm_lead = max(0, len(steps) - 1 - first_alarm)
+    mean_latency = float(np.mean([s.latency_ms for s in steps if s.latency_ms is not None])) if steps else 0.0
     return DriftSessionResult(
         generated_text=generated_text,
         steps=steps,
         alarms=alarms,
         steered_steps=steered_steps,
+        first_alarm_token=first_alarm,
+        first_alarm_lead_time=first_alarm_lead,
+        mean_step_latency_ms=mean_latency,
     )
 
 
@@ -300,6 +375,7 @@ def run_driftguard_session_nnsight(
     steps: list[DriftStep] = []
 
     for step_idx in range(cfg.max_new_tokens):
+        t0 = perf_counter()
         layers = _resolve_nnsight_layer_stack(nns_model)
         with nns_model.trace(running_text):
             hidden_proxy = layers[cfg.layer_idx].output[0].save()
@@ -348,17 +424,13 @@ def run_driftguard_session_nnsight(
             topology_beta0 = topo.beta0
             topology_beta1 = topo.beta1
 
-        continuity_risk = 0.0
-        if cos is not None:
-            continuity_risk += max(0.0, cfg.cosine_floor - cos) / max(
-                1.0 - cfg.cosine_floor, 1e-6
-            )
-        lipschitz_risk = 0.0
-        if lip is not None:
-            lipschitz_risk = max(0.0, lip - cfg.lipschitz_ceiling) / max(
-                cfg.lipschitz_ceiling, 1e-6
-            )
-        risk_score = float(np.clip(0.5 * continuity_risk + 0.5 * lipschitz_risk, 0.0, 1.5))
+        risk_score = _compute_risk_score(
+            cfg=cfg,
+            cosine=cos,
+            lipschitz=lip,
+            topology_diameter=topology_diam,
+            topology_beta1=topology_beta1,
+        )
         alarm = risk_score >= cfg.risk_threshold
         steered = False
 
@@ -382,6 +454,7 @@ def run_driftguard_session_nnsight(
             temperature=cfg.temperature,
         )
         generated.append(token_id)
+        latency_ms = (perf_counter() - t0) * 1000.0
         steps.append(
             DriftStep(
                 token_id=token_id,
@@ -393,6 +466,7 @@ def run_driftguard_session_nnsight(
                 risk_score=risk_score,
                 alarm=alarm,
                 steered=steered,
+                latency_ms=latency_ms,
             )
         )
         prev_hidden = hidden
@@ -404,9 +478,17 @@ def run_driftguard_session_nnsight(
     generated_text = tokenizer.decode(generated, skip_special_tokens=True)
     alarms = sum(1 for s in steps if s.alarm)
     steered_steps = sum(1 for s in steps if s.steered)
+    first_alarm = next((i for i, s in enumerate(steps) if s.alarm), None)
+    first_alarm_lead = None
+    if first_alarm is not None:
+        first_alarm_lead = max(0, len(steps) - 1 - first_alarm)
+    mean_latency = float(np.mean([s.latency_ms for s in steps if s.latency_ms is not None])) if steps else 0.0
     return DriftSessionResult(
         generated_text=generated_text,
         steps=steps,
         alarms=alarms,
         steered_steps=steered_steps,
+        first_alarm_token=first_alarm,
+        first_alarm_lead_time=first_alarm_lead,
+        mean_step_latency_ms=mean_latency,
     )
