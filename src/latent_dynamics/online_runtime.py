@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from latent_dynamics.steering import steer_toward_reference
+from latent_dynamics.steering import steer_toward_reference, steer_with_nnsight
 from latent_dynamics.tda_metrics import topology_snapshot
 
 
@@ -22,6 +22,8 @@ class DriftGuardConfig:
     topology_window: int = 24
     topology_stride: int = 4
     steering_strength: float = 0.20
+    use_nnsight: bool = False
+    clear_cache_after_steer: bool = True
 
 
 @dataclass
@@ -43,6 +45,38 @@ class DriftSessionResult:
     steps: list[DriftStep]
     alarms: int
     steered_steps: int
+
+
+def _resolve_nnsight_layer_stack(model_obj: object) -> object:
+    roots = [getattr(model_obj, "model", None), model_obj]
+    for root in roots:
+        if root is None:
+            continue
+        if hasattr(root, "layers"):
+            return root.layers
+        if hasattr(root, "model") and hasattr(root.model, "layers"):
+            return root.model.layers
+        if hasattr(root, "language_model") and hasattr(root.language_model, "layers"):
+            return root.language_model.layers
+        if hasattr(root, "transformer") and hasattr(root.transformer, "h"):
+            return root.transformer.h
+        if hasattr(root, "gpt_neox") and hasattr(root.gpt_neox, "layers"):
+            return root.gpt_neox.layers
+    raise AttributeError("Could not locate nnsight layer stack on wrapped model.")
+
+
+def _materialize_proxy(value: object) -> object:
+    return value.value if hasattr(value, "value") else value
+
+
+def _maybe_clear_device_cache(device: str) -> None:
+    if device.startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    if device.startswith("mps") and hasattr(torch, "mps"):
+        try:
+            torch.mps.empty_cache()
+        except Exception:
+            pass
 
 
 def _cosine(x: torch.Tensor, y: torch.Tensor) -> float:
@@ -171,6 +205,8 @@ def run_driftguard_session(
             steer_logits = model.get_output_embeddings()(steered_hidden)
             logits = logits + (steer_logits - base_logits)
             steered = steering_result.applied
+            if steered and cfg.clear_cache_after_steer:
+                _maybe_clear_device_cache(device)
 
         token_id = _next_token_id(
             logits=logits,
@@ -198,6 +234,172 @@ def run_driftguard_session(
 
         input_ids = torch.tensor([[token_id]], dtype=torch.long, device=device)
         attention_mask = torch.ones_like(input_ids, device=device)
+
+    generated_text = tokenizer.decode(generated, skip_special_tokens=True)
+    alarms = sum(1 for s in steps if s.alarm)
+    steered_steps = sum(1 for s in steps if s.steered)
+    return DriftSessionResult(
+        generated_text=generated_text,
+        steps=steps,
+        alarms=alarms,
+        steered_steps=steered_steps,
+    )
+
+
+def load_nnsight_model(
+    model_path: str,
+    device_map: str = "auto",
+    load_in_4bit: bool = False,
+) -> object:
+    try:
+        from nnsight import LanguageModel  # type: ignore[import]
+        kwargs: dict[str, object] = {"device_map": device_map}
+        if load_in_4bit:
+            # Not all nnsight backends expose quantized constructor kwargs.
+            kwargs["dispatch"] = True
+        return LanguageModel(model_path, **kwargs)
+    except Exception:
+        pass
+
+    try:
+        from nnsight import NNsight  # type: ignore[import]
+    except Exception as exc:
+        raise ImportError("nnsight is required for --use-nnsight.") from exc
+
+    if hasattr(NNsight, "from_pretrained"):
+        return NNsight.from_pretrained(
+            model_path,
+            device_map=device_map,
+            load_in_4bit=load_in_4bit,
+        )
+
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        device_map=device_map,
+    )
+    return NNsight(hf_model)
+
+
+def run_driftguard_session_nnsight(
+    nns_model: object,
+    tokenizer: AutoTokenizer,
+    prompt: str,
+    cfg: DriftGuardConfig,
+    device: str,
+    safe_reference: torch.Tensor | None = None,
+) -> DriftSessionResult:
+    """
+    nnsight-backed online drift loop using full-prefix decoding per step.
+
+    This path favors tracing fidelity over speed.
+    """
+    running_text = prompt
+    prev_hidden: torch.Tensor | None = None
+    hidden_history: list[np.ndarray] = []
+    generated: list[int] = []
+    steps: list[DriftStep] = []
+
+    for step_idx in range(cfg.max_new_tokens):
+        layers = _resolve_nnsight_layer_stack(nns_model)
+        with nns_model.trace(running_text):
+            hidden_proxy = layers[cfg.layer_idx].output[0].save()
+            logits_proxy = nns_model.lm_head.output.save()
+        hidden_val = _materialize_proxy(hidden_proxy)
+        logits_val = _materialize_proxy(logits_proxy)
+        if isinstance(hidden_val, torch.Tensor):
+            hidden_t = hidden_val.detach()
+        else:
+            hidden_t = torch.as_tensor(hidden_val)
+        if hidden_t.ndim == 3:
+            hidden = hidden_t[:, -1, :]
+        elif hidden_t.ndim == 2:
+            hidden = hidden_t[-1:, :]
+        else:
+            raise ValueError(f"Unexpected hidden tensor rank for nnsight: {hidden_t.ndim}")
+
+        if isinstance(logits_val, torch.Tensor):
+            logits_t = logits_val.detach()
+        else:
+            logits_t = torch.as_tensor(logits_val)
+        if logits_t.ndim == 3:
+            logits_last = logits_t[:, -1, :]
+        elif logits_t.ndim == 2:
+            logits_last = logits_t[-1:, :]
+        else:
+            raise ValueError(f"Unexpected logits tensor rank for nnsight: {logits_t.ndim}")
+        hidden_history.append(hidden.squeeze(0).float().cpu().numpy())
+
+        cos = None
+        lip = None
+        topology_diam = None
+        topology_beta0 = None
+        topology_beta1 = None
+        if prev_hidden is not None:
+            cos = _cosine(hidden, prev_hidden)
+            lip = _lipschitz_proxy(hidden, prev_hidden)
+
+        if (
+            len(hidden_history) >= cfg.topology_window
+            and step_idx % max(cfg.topology_stride, 1) == 0
+        ):
+            window = np.asarray(hidden_history[-cfg.topology_window :], dtype=np.float32)
+            topo = topology_snapshot(window)
+            topology_diam = topo.diameter
+            topology_beta0 = topo.beta0
+            topology_beta1 = topo.beta1
+
+        continuity_risk = 0.0
+        if cos is not None:
+            continuity_risk += max(0.0, cfg.cosine_floor - cos) / max(
+                1.0 - cfg.cosine_floor, 1e-6
+            )
+        lipschitz_risk = 0.0
+        if lip is not None:
+            lipschitz_risk = max(0.0, lip - cfg.lipschitz_ceiling) / max(
+                cfg.lipschitz_ceiling, 1e-6
+            )
+        risk_score = float(np.clip(0.5 * continuity_risk + 0.5 * lipschitz_risk, 0.0, 1.5))
+        alarm = risk_score >= cfg.risk_threshold
+        steered = False
+
+        logits_for_sample = logits_last
+        if alarm and safe_reference is not None:
+            steer_out = steer_with_nnsight(
+                nns_model=nns_model,
+                prompt=running_text,
+                safe_ref_hidden=safe_reference,
+                layer_idx=cfg.layer_idx,
+                alpha=cfg.steering_strength,
+            )
+            logits_for_sample = torch.as_tensor(steer_out["logits"]).to(logits_last.device)
+            steered = True
+            if cfg.clear_cache_after_steer:
+                _maybe_clear_device_cache(device)
+
+        token_id = _next_token_id(
+            logits=logits_for_sample,
+            do_sample=cfg.do_sample,
+            temperature=cfg.temperature,
+        )
+        generated.append(token_id)
+        steps.append(
+            DriftStep(
+                token_id=token_id,
+                cosine_continuity=cos,
+                lipschitz_proxy=lip,
+                topology_diameter=topology_diam,
+                topology_beta0=topology_beta0,
+                topology_beta1=topology_beta1,
+                risk_score=risk_score,
+                alarm=alarm,
+                steered=steered,
+            )
+        )
+        prev_hidden = hidden
+
+        if token_id == tokenizer.eos_token_id:
+            break
+        running_text = running_text + tokenizer.decode([token_id], skip_special_tokens=False)
 
     generated_text = tokenizer.decode(generated, skip_special_tokens=True)
     alarms = sum(1 for s in steps if s.alarm)

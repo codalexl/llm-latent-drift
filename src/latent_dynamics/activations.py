@@ -386,3 +386,60 @@ def build_feature_matrix(
     pooling: str,
 ) -> np.ndarray:
     return np.stack([pool_trajectory(t, pooling) for t in trajectories], axis=0)
+
+
+def collect_trajectories_nnsight(
+    model_path: str,
+    prompts: list[str],
+    layer_idx: int,
+    device_map: str = "auto",
+    load_in_4bit: bool = False,
+) -> list[np.ndarray]:
+    """
+    Collect hidden trajectories with nnsight in one traced forward per prompt.
+
+    This is an optional high-fidelity path used when nnsight is available.
+    """
+    try:
+        from latent_dynamics.online_runtime import load_nnsight_model
+    except Exception as exc:
+        raise ImportError(
+            "nnsight runtime helpers are unavailable; cannot run nnsight extraction."
+        ) from exc
+
+    nns_model = load_nnsight_model(
+        model_path=model_path,
+        device_map=device_map,
+        load_in_4bit=load_in_4bit,
+    )
+
+    def _layer_stack(model_obj: object) -> object:
+        roots = [getattr(model_obj, "model", None), model_obj]
+        for root in roots:
+            if root is None:
+                continue
+            if hasattr(root, "layers"):
+                return root.layers
+            if hasattr(root, "model") and hasattr(root.model, "layers"):
+                return root.model.layers
+            if hasattr(root, "language_model") and hasattr(root.language_model, "layers"):
+                return root.language_model.layers
+            if hasattr(root, "transformer") and hasattr(root.transformer, "h"):
+                return root.transformer.h
+            if hasattr(root, "gpt_neox") and hasattr(root.gpt_neox, "layers"):
+                return root.gpt_neox.layers
+        raise AttributeError("Could not locate nnsight layer stack on wrapped model.")
+
+    layers = _layer_stack(nns_model)
+    trajectories: list[np.ndarray] = []
+    for prompt in prompts:
+        with nns_model.trace(prompt):
+            # Most decoder-only models expose transformer layers here.
+            hidden_proxy = layers[layer_idx].output[0].save()
+        hidden = hidden_proxy.value if hasattr(hidden_proxy, "value") else hidden_proxy
+        if isinstance(hidden, torch.Tensor):
+            hidden_arr = hidden.squeeze(0).float().cpu().numpy()
+        else:
+            hidden_arr = np.asarray(hidden).squeeze(0)
+        trajectories.append(hidden_arr)
+    return trajectories

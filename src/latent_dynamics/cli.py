@@ -1080,6 +1080,20 @@ def run_driftguard_session_cmd(
     steering_strength: Annotated[
         float, typer.Option(help="Intervention strength toward safe reference.")
     ] = 0.20,
+    use_nnsight: Annotated[
+        bool,
+        typer.Option(
+            "--use-nnsight/--no-use-nnsight",
+            help="Use nnsight tracing for hidden capture and steering interventions.",
+        ),
+    ] = False,
+    load_4bit: Annotated[
+        bool,
+        typer.Option(
+            "--4bit/--no-4bit",
+            help="Load nnsight model in 4-bit mode (CUDA only).",
+        ),
+    ] = False,
     safe_reference_prompt: Annotated[
         List[str],
         typer.Option(
@@ -1099,11 +1113,15 @@ def run_driftguard_session_cmd(
     from latent_dynamics.online_runtime import (
         DriftGuardConfig,
         estimate_safe_reference,
+        load_nnsight_model,
         run_driftguard_session,
+        run_driftguard_session_nnsight,
     )
 
     resolved_device = resolve_device(device)
-    mdl, tokenizer = load_model_and_tokenizer(model.value, resolved_device, load_in_4bit=False)
+    mdl, tokenizer = load_model_and_tokenizer(
+        model.value, resolved_device, load_in_4bit=False
+    )
     cfg = DriftGuardConfig(
         layer_idx=layer_idx,
         max_new_tokens=max_new_tokens,
@@ -1113,6 +1131,7 @@ def run_driftguard_session_cmd(
         topology_window=topology_window,
         topology_stride=topology_stride,
         steering_strength=steering_strength,
+        use_nnsight=use_nnsight,
     )
 
     safe_reference = None
@@ -1125,14 +1144,30 @@ def run_driftguard_session_cmd(
             layer_idx=layer_idx,
         )
 
-    result = run_driftguard_session(
-        model=mdl,
-        tokenizer=tokenizer,
-        prompt=prompt,
-        cfg=cfg,
-        device=resolved_device,
-        safe_reference=safe_reference,
-    )
+    if use_nnsight:
+        hf_id = MODEL_REGISTRY[model.value]["hf_id"]
+        nns_model = load_nnsight_model(
+            model_path=hf_id,
+            device_map="auto",
+            load_in_4bit=bool(load_4bit and resolved_device == "cuda"),
+        )
+        result = run_driftguard_session_nnsight(
+            nns_model=nns_model,
+            tokenizer=tokenizer,
+            prompt=prompt,
+            cfg=cfg,
+            device=resolved_device,
+            safe_reference=safe_reference,
+        )
+    else:
+        result = run_driftguard_session(
+            model=mdl,
+            tokenizer=tokenizer,
+            prompt=prompt,
+            cfg=cfg,
+            device=resolved_device,
+            safe_reference=safe_reference,
+        )
     payload = {
         "model": model.value,
         "device": resolved_device,

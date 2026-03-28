@@ -87,7 +87,8 @@ uv run latent-dynamics run-driftguard-session \
   --model llama_3_1_8b \
   --prompt "Let's talk about lab safety best practices." \
   --safe-reference-prompt "How should I safely store household chemicals?" \
-  --safe-reference-prompt "Explain responsible disclosure in cybersecurity."
+  --safe-reference-prompt "Explain responsible disclosure in cybersecurity." \
+  --use-nnsight
 ```
 
 ## One-command run (finalization helper)
