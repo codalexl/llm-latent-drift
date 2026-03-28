@@ -1045,6 +1045,124 @@ def compute_drift_cmd(
         typer.echo(f"Wrote report to {output_json}")
 
 
+@app.command("run-driftguard-session")
+def run_driftguard_session_cmd(
+    model: Annotated[
+        ModelKey, typer.Option(help="Model key from registry.")
+    ] = ModelKey.llama_3_1_8b,
+    prompt: Annotated[
+        str, typer.Option(help="Prompt to evaluate with online drift monitoring.")
+    ] = "You are a helpful assistant.",
+    device: Annotated[
+        Optional[str], typer.Option(help="Device override (cuda/mps/cpu).")
+    ] = None,
+    layer_idx: Annotated[
+        int, typer.Option(help="Layer index used for drift monitoring.")
+    ] = -1,
+    max_new_tokens: Annotated[
+        int, typer.Option(help="Maximum generated tokens.")
+    ] = 128,
+    cosine_floor: Annotated[
+        float, typer.Option(help="Continuity floor for cosine(h_t, h_{t-1}).")
+    ] = 0.96,
+    lipschitz_ceiling: Annotated[
+        float, typer.Option(help="Ceiling for local Lipschitz proxy.")
+    ] = 0.20,
+    risk_threshold: Annotated[
+        float, typer.Option(help="Alarm threshold on fused risk score.")
+    ] = 0.5,
+    topology_window: Annotated[
+        int, typer.Option(help="Window size for TDA snapshots.")
+    ] = 24,
+    topology_stride: Annotated[
+        int, typer.Option(help="Stride for TDA snapshot updates.")
+    ] = 4,
+    steering_strength: Annotated[
+        float, typer.Option(help="Intervention strength toward safe reference.")
+    ] = 0.20,
+    safe_reference_prompt: Annotated[
+        List[str],
+        typer.Option(
+            help=(
+                "Repeatable safe prompts used to estimate safe reference state. "
+                "Provide multiple values for better calibration."
+            )
+        ),
+    ] = [],
+    output_json: Annotated[
+        Optional[Path],
+        typer.Option(help="Optional output JSON path for per-step drift logs."),
+    ] = None,
+) -> None:
+    """Run a single online session with early-warning + activation steering."""
+    from latent_dynamics.models import load_model_and_tokenizer, resolve_device
+    from latent_dynamics.online_runtime import (
+        DriftGuardConfig,
+        estimate_safe_reference,
+        run_driftguard_session,
+    )
+
+    resolved_device = resolve_device(device)
+    mdl, tokenizer = load_model_and_tokenizer(model.value, resolved_device, load_in_4bit=False)
+    cfg = DriftGuardConfig(
+        layer_idx=layer_idx,
+        max_new_tokens=max_new_tokens,
+        cosine_floor=cosine_floor,
+        lipschitz_ceiling=lipschitz_ceiling,
+        risk_threshold=risk_threshold,
+        topology_window=topology_window,
+        topology_stride=topology_stride,
+        steering_strength=steering_strength,
+    )
+
+    safe_reference = None
+    if safe_reference_prompt:
+        safe_reference = estimate_safe_reference(
+            model=mdl,
+            tokenizer=tokenizer,
+            prompts=safe_reference_prompt,
+            device=resolved_device,
+            layer_idx=layer_idx,
+        )
+
+    result = run_driftguard_session(
+        model=mdl,
+        tokenizer=tokenizer,
+        prompt=prompt,
+        cfg=cfg,
+        device=resolved_device,
+        safe_reference=safe_reference,
+    )
+    payload = {
+        "model": model.value,
+        "device": resolved_device,
+        "prompt": prompt,
+        "generated_text": result.generated_text,
+        "alarms": result.alarms,
+        "steered_steps": result.steered_steps,
+        "steps": [
+            {
+                "token_id": s.token_id,
+                "cosine_continuity": s.cosine_continuity,
+                "lipschitz_proxy": s.lipschitz_proxy,
+                "topology_diameter": s.topology_diameter,
+                "topology_beta0": s.topology_beta0,
+                "topology_beta1": s.topology_beta1,
+                "risk_score": s.risk_score,
+                "alarm": s.alarm,
+                "steered": s.steered,
+            }
+            for s in result.steps
+        ],
+    }
+    text = json.dumps(payload, indent=2)
+    typer.echo(text)
+    if output_json is not None:
+        output_json.parent.mkdir(parents=True, exist_ok=True)
+        output_json.write_text(text)
+        typer.echo(f"Wrote report to {output_json}")
+
+
 @app.command("milestone23")
 def milestone23_backward_compat(
     activations: Annotated[

@@ -6,6 +6,7 @@ This repo now supports:
 - Milestone 1: trajectory collection + visualization
 - Milestone 2: trust-region fitting + comparative baselines
 - Milestone 3: drift metrics + generator-shift evaluation
+- DriftGuard runtime: online drift monitoring + activation steering (inference-time)
 
 ## Setup
 
@@ -81,6 +82,12 @@ uv run latent-dynamics fit-trust-region \
 uv run latent-dynamics compute-drift \
   --activations activations/xstest/train/qwen3_8b/layer_24 \
   --model-path models/trust_region_qwen3_8b.pkl
+
+uv run latent-dynamics run-driftguard-session \
+  --model llama_3_1_8b \
+  --prompt "Let's talk about lab safety best practices." \
+  --safe-reference-prompt "How should I safely store household chemicals?" \
+  --safe-reference-prompt "Explain responsible disclosure in cybersecurity."
 ```
 
 ## One-command run (finalization helper)

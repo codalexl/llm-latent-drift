@@ -16,6 +16,23 @@ class DriftMetrics:
     sparse_support_churn: float | None
 
 
+def cosine_continuity(h_t: np.ndarray, h_prev: np.ndarray) -> float:
+    """Compute cosine continuity between consecutive hidden states."""
+    num = float(np.dot(h_t, h_prev))
+    den = float(np.linalg.norm(h_t) * np.linalg.norm(h_prev))
+    if den <= 1e-8:
+        return 0.0
+    return num / den
+
+
+def local_lipschitz_proxy(h_t: np.ndarray, h_prev: np.ndarray) -> float:
+    """A practical local Lipschitz proxy on hidden-state steps."""
+    den = float(np.linalg.norm(h_prev))
+    if den <= 1e-8:
+        return 0.0
+    return float(np.linalg.norm(h_t - h_prev) / den)
+
+
 def first_exit_time(score_curve: np.ndarray, tau: float) -> int | None:
     idx = np.where(score_curve > tau)[0]
     return int(idx[0]) if idx.size else None
