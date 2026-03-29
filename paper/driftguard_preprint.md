@@ -122,7 +122,7 @@ Early warning:
 - boundary crossing frequency and risk smoothness (offline summaries).
 
 Intervention and utility:
-- unsafe output rate (with optional judge labels),
+- unsafe output rate (from dataset-grounded labels and endpoint proxies),
 - benign over-refusal / benign compliance retention,
 - intervention rate and steered-step fraction.
 
@@ -178,7 +178,7 @@ Caption: *Mean per-token latency for no-steer versus steer conditions; quantifie
 
 1. **TDA scaling:** persistent homology cost grows with context length; practical operation requires windowing and dimensionality reduction, potentially missing long-range structure.
 2. **Threshold transportability:** calibrated thresholds are model/quantization dependent and may not transfer across architectures without recalibration.
-3. **Proxy mismatch risk:** if unsafe-output labels rely on weak judges or endpoint proxies, intervention benefit may be misestimated.
+3. **Proxy mismatch risk:** if unsafe-output labels rely on weak endpoint proxies, intervention benefit may be misestimated.
 4. **Steering side effects:** latent correction can increase benign refusals in ambiguous contexts; this requires constrained steering strength and abstention policies.
 5. **Adaptive adversaries:** attackers may optimize around known alarm surfaces; robust deployment requires randomized checks and periodic red-team refresh.
 

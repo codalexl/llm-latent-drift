@@ -10,7 +10,6 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.decomposition import PCA
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -19,6 +18,7 @@ if str(SRC) not in sys.path:
 
 from latent_dynamics.hub import load_activations
 from latent_dynamics.tda_metrics import pca_reduce
+from latent_dynamics.utils import save_persistence_diagram
 
 
 def _ensure_dir(path: Path) -> None:
@@ -88,10 +88,10 @@ def _plot_pca_paths(activations: Path, out_path: Path) -> None:
     unsafe_idx = int(np.where(labels == 1)[0][0]) if np.any(labels == 1) else 0
     safe = trajectories[safe_idx]
     unsafe = trajectories[unsafe_idx]
-    pca = PCA(n_components=2)
-    pca.fit(np.concatenate([safe, unsafe], axis=0))
-    safe_z = pca.transform(safe)
-    unsafe_z = pca.transform(unsafe)
+    joint = np.concatenate([safe, unsafe], axis=0)
+    joint_z = pca_reduce(joint, n_components=2)
+    safe_z = joint_z[: safe.shape[0]]
+    unsafe_z = joint_z[safe.shape[0] :]
     plt.figure(figsize=(6, 5))
     plt.plot(safe_z[:, 0], safe_z[:, 1], color="tab:green", label="safe", linewidth=2)
     plt.plot(unsafe_z[:, 0], unsafe_z[:, 1], color="tab:red", label="unsafe", linewidth=2)
@@ -119,27 +119,10 @@ def _plot_persistence_diagram(activations: Path, out_path: Path) -> None:
     dgms = ripser(points, maxdim=1).get("dgms", [])
     if len(dgms) < 2:
         return
-    d0, d1 = dgms[0], dgms[1]
-    plt.figure(figsize=(6, 6))
-    lim_max = 1.0
-    if d0.size:
-        lim_max = max(lim_max, float(np.nanmax(d0[np.isfinite(d0)])))
-    if d1.size:
-        lim_max = max(lim_max, float(np.nanmax(d1[np.isfinite(d1)])))
-    if d0.size:
-        plt.scatter(d0[:, 0], d0[:, 1], c="tab:blue", s=12, label="H0")
-    if d1.size:
-        plt.scatter(d1[:, 0], d1[:, 1], c="tab:orange", s=12, label="H1")
-    plt.plot([0, lim_max], [0, lim_max], "k--", linewidth=1)
-    plt.xlim(0, lim_max)
-    plt.ylim(0, lim_max)
-    plt.xlabel("Birth")
-    plt.ylabel("Death")
-    plt.title("Persistence diagram (example unsafe trajectory)")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=200)
-    plt.close()
+    d1 = dgms[1]
+    if d1.size == 0:
+        return
+    save_persistence_diagram(d1, str(out_path))
 
 
 def main() -> None:

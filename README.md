@@ -90,5 +90,5 @@ uv run python experiments/plot_driftguard_benchmark.py \
 
 - For static PNG export from Plotly, install `kaleido`.
 - 4-bit loading requires CUDA-compatible `bitsandbytes`.
-- Calibration in this repository is fully label-driven and does not use an LLM judge pipeline.
+- Calibration in this repository is fully label-driven.
 

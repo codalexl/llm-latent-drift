@@ -1,1 +1,1 @@
-uv run src/latent_dynamics/cli.py extract --dataset "wildjailbreak" --all-layers --max-samples 10 --use-generate --judge-generations
+uv run src/latent_dynamics/cli.py extract --dataset "wildjailbreak" --all-layers --max-samples 10 --use-generate

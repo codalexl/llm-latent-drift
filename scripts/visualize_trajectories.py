@@ -30,6 +30,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from latent_dynamics.hub import load_activations  # type: ignore[import]
+from latent_dynamics.tda_metrics import topology_snapshot  # type: ignore[import]
 
 try:
     import umap  # type: ignore[import]
@@ -42,11 +43,15 @@ import plotly.graph_objects as go
 
 
 def _maybe_write_image(fig: go.Figure, path: Path, dpi: int = 300) -> None:
-    """Write HTML and best-effort PNG for a figure."""
+    """Write HTML and best-effort PNG/SVG for a figure."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(str(path.with_suffix(".html")))
     try:
         fig.write_image(str(path.with_suffix(".png")), scale=max(1, dpi // 100))
+    except Exception:
+        pass
+    try:
+        fig.write_image(str(path.with_suffix(".svg")))
     except Exception:
         pass
 
@@ -55,6 +60,21 @@ def _sanitize_for_projection(values: np.ndarray, clip_value: float = 1e3) -> np.
     """Keep projection numerics stable for noisy hidden-state tensors."""
     arr = np.nan_to_num(values.astype(np.float64), nan=0.0, posinf=clip_value, neginf=-clip_value)
     return np.clip(arr, -clip_value, clip_value)
+
+
+def _project_2d(features: np.ndarray) -> np.ndarray:
+    """Project to 2D with graceful fallback for tiny sample counts."""
+    if features.ndim != 2:
+        raise ValueError("features must have shape (n_samples, n_dims).")
+    n_samples, n_dims = features.shape
+    if n_samples == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    if n_samples < 2 or n_dims < 2:
+        out = np.zeros((n_samples, 2), dtype=np.float32)
+        out[:, 0] = features[:, 0].astype(np.float32)
+        return out
+    pca = PCA(n_components=2)
+    return pca.fit_transform(features).astype(np.float32)
 
 
 def _mean_pool_trajectories(trajectories: Sequence[np.ndarray]) -> np.ndarray:
@@ -90,6 +110,106 @@ def _pick_indices(labels: np.ndarray, value: int, k: int) -> list[int]:
     return idx[:k]
 
 
+def _cosine_drift_matrix(trajectories: Sequence[np.ndarray]) -> np.ndarray:
+    max_steps = max((max(0, traj.shape[0] - 1) for traj in trajectories), default=1)
+    mat = np.full((len(trajectories), max_steps), np.nan, dtype=np.float32)
+    for i, traj in enumerate(trajectories):
+        if traj.shape[0] < 2:
+            continue
+        prev = traj[:-1]
+        nxt = traj[1:]
+        denom = (np.linalg.norm(prev, axis=1) * np.linalg.norm(nxt, axis=1)) + 1e-8
+        cos = np.sum(prev * nxt, axis=1) / denom
+        mat[i, : cos.shape[0]] = 1.0 - np.clip(cos, -1.0, 1.0)
+    return mat
+
+
+def _rolling_beta1_matrix(
+    trajectories: Sequence[np.ndarray],
+    window: int,
+    stride: int,
+) -> np.ndarray:
+    counts = []
+    for traj in trajectories:
+        if traj.shape[0] < window:
+            counts.append(0)
+            continue
+        counts.append(1 + max(0, (traj.shape[0] - window) // stride))
+    max_windows = max(counts, default=1)
+    mat = np.full((len(trajectories), max_windows), np.nan, dtype=np.float32)
+    for i, traj in enumerate(trajectories):
+        if traj.shape[0] < window:
+            continue
+        col = 0
+        for start in range(0, traj.shape[0] - window + 1, stride):
+            topo = topology_snapshot(traj[start : start + window])
+            mat[i, col] = float(topo.beta1) if topo.beta1 is not None else np.nan
+            col += 1
+    return mat
+
+
+def _plot_heatmap(
+    matrix: np.ndarray,
+    title: str,
+    x_label: str,
+    color_label: str,
+    out_path: Path,
+    zmin: float | None = None,
+    zmax: float | None = None,
+) -> None:
+    if matrix.size == 0:
+        return
+    fig = go.Figure(
+        data=[
+            go.Heatmap(
+                z=matrix,
+                colorscale="Viridis",
+                colorbar={"title": color_label},
+                zmin=zmin,
+                zmax=zmax,
+            )
+        ]
+    )
+    fig.update_layout(
+        title=title,
+        xaxis_title=x_label,
+        yaxis_title="Trajectory index",
+        template="plotly_white",
+    )
+    _maybe_write_image(fig, out_path)
+
+
+def plot_pca_manifold(
+    features: np.ndarray,
+    labels: np.ndarray,
+    title: str,
+    out_path: Path,
+) -> None:
+    features = _sanitize_for_projection(features)
+    emb = _project_2d(features)
+    fig = go.Figure()
+    for value, name, color in [(0, "safe", "seagreen"), (1, "unsafe", "crimson")]:
+        mask = labels == value
+        if not np.any(mask):
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=emb[mask, 0],
+                y=emb[mask, 1],
+                mode="markers",
+                marker={"color": color, "size": 6, "opacity": 0.8},
+                name=name,
+            )
+        )
+    fig.update_layout(
+        title=title,
+        xaxis_title="PC1",
+        yaxis_title="PC2",
+        template="plotly_white",
+    )
+    _maybe_write_image(fig, out_path)
+
+
 def plot_umap(
     features: np.ndarray,
     labels: np.ndarray,
@@ -98,17 +218,19 @@ def plot_umap(
 ) -> None:
     features = _sanitize_for_projection(features)
     if HAS_UMAP:
-        reducer = umap.UMAP(
-            n_components=2,
-            random_state=42,
-            n_neighbors=15,
-            min_dist=0.1,
-        )
-        emb = reducer.fit_transform(features)
+        try:
+            reducer = umap.UMAP(
+                n_components=2,
+                random_state=42,
+                n_neighbors=15,
+                min_dist=0.1,
+            )
+            emb = reducer.fit_transform(features)
+        except Exception:
+            emb = _project_2d(features)
     else:
         # Fallback: PCA-only if UMAP is unavailable.
-        pca = PCA(n_components=2)
-        emb = pca.fit_transform(features)
+        emb = _project_2d(features)
 
     fig = go.Figure()
     for value, name, color in [(0, "safe", "seagreen"), (1, "unsafe", "crimson")]:
@@ -150,7 +272,10 @@ def plot_trajectory_paths(
 
     # Fit PCA on all token vectors.
     all_tokens = _sanitize_for_projection(np.concatenate(trajectories, axis=0))
-    pca = PCA(n_components=path_dims)
+    n_comp = min(path_dims, all_tokens.shape[0], all_tokens.shape[1])
+    if n_comp < 1:
+        return
+    pca = PCA(n_components=n_comp)
     pca.fit(all_tokens)
 
     safe_idx = _pick_indices(labels, 0, max_per_class)
@@ -216,6 +341,12 @@ def plot_trajectory_paths(
 
     for i in safe_idx:
         traj_proj = pca.transform(_sanitize_for_projection(trajectories[i]))
+        if n_comp < path_dims:
+            traj_proj = np.pad(
+                traj_proj,
+                ((0, 0), (0, path_dims - n_comp)),
+                mode="constant",
+            )
         if path_dims == 2:
             fig.add_trace(
                 go.Scatter(
@@ -247,6 +378,12 @@ def plot_trajectory_paths(
 
     for i in unsafe_idx:
         traj_proj = pca.transform(_sanitize_for_projection(trajectories[i]))
+        if n_comp < path_dims:
+            traj_proj = np.pad(
+                traj_proj,
+                ((0, 0), (0, path_dims - n_comp)),
+                mode="constant",
+            )
         if path_dims == 2:
             fig.add_trace(
                 go.Scatter(
@@ -370,11 +507,27 @@ def main() -> None:
         default=3,
         help="Max number of safe and unsafe trajectories to draw in path plots.",
     )
+    parser.add_argument(
+        "--betti-window",
+        type=int,
+        default=24,
+        help="Window size for rolling beta1 heatmap.",
+    )
+    parser.add_argument(
+        "--betti-stride",
+        type=int,
+        default=4,
+        help="Stride for rolling beta1 heatmap.",
+    )
     args = parser.parse_args()
     if args.arrow_step < 1:
         parser.error("--arrow-step must be >= 1")
     if args.max_paths_per_class < 1:
         parser.error("--max-paths-per-class must be >= 1")
+    if args.betti_window < 3:
+        parser.error("--betti-window must be >= 3")
+    if args.betti_stride < 1:
+        parser.error("--betti-stride must be >= 1")
 
     trajectories, texts, labels, token_texts, _generated, cfg = load_activations(args.activations)
     labels_arr = labels if labels is not None else np.zeros(len(trajectories), dtype=np.int64)
@@ -397,6 +550,19 @@ def main() -> None:
     )
     captions[umap_path.with_suffix(".png").name] = (
         f"UMAP of mean-pooled hidden states for {model_key} layer {layer}, colored by safe (0) vs unsafe (1)."
+    )
+
+    # 1b. PCA manifold of mean-pooled trajectories.
+    pca_manifold_path = fig_dir / f"pca_manifold_{model_key}_L{layer}"
+    plot_pca_manifold(
+        pooled,
+        labels_arr,
+        title=f"PCA manifold of mean-pooled trajectories — {model_key}, layer {layer}",
+        out_path=pca_manifold_path,
+    )
+    captions[pca_manifold_path.with_suffix(".png").name] = (
+        f"PCA manifold of mean-pooled hidden states for {model_key} layer {layer}, "
+        "colored by safe (0) vs unsafe (1)."
     )
 
     # 2. Safe/unsafe token paths in PCA space (2D or 3D).
@@ -440,6 +606,43 @@ def main() -> None:
     )
     captions[curvature_path.with_suffix(".png").name] = (
         f"Histogram of per-step curvature (angle between successive step vectors) for {model_key} layer {layer}."
+    )
+
+    # 4. Cosine-drift heatmap over token transitions.
+    cosine_mat = _cosine_drift_matrix(trajectories)
+    cosine_heatmap_path = fig_dir / f"cosine_drift_heatmap_{model_key}_L{layer}"
+    _plot_heatmap(
+        cosine_mat,
+        title=f"Cosine drift heatmap — {model_key}, layer {layer}",
+        x_label="Token transition index",
+        color_label="1 - cosine",
+        out_path=cosine_heatmap_path,
+        zmin=0.0,
+        zmax=1.0,
+    )
+    captions[cosine_heatmap_path.with_suffix(".png").name] = (
+        f"Per-trajectory heatmap of token-to-token drift (1 - cosine) for {model_key} layer {layer}."
+    )
+
+    # 5. Rolling Betti-1 heatmap for topological warning signals.
+    beta1_mat = _rolling_beta1_matrix(
+        trajectories,
+        window=args.betti_window,
+        stride=args.betti_stride,
+    )
+    beta1_heatmap_path = fig_dir / f"betti1_heatmap_{model_key}_L{layer}"
+    _plot_heatmap(
+        beta1_mat,
+        title=f"Rolling Betti-1 heatmap — {model_key}, layer {layer}",
+        x_label="Window index",
+        color_label="beta1",
+        out_path=beta1_heatmap_path,
+        zmin=0.0,
+        zmax=float(np.nanmax(beta1_mat)) if np.isfinite(beta1_mat).any() else 1.0,
+    )
+    captions[beta1_heatmap_path.with_suffix(".png").name] = (
+        f"Rolling-window Betti-1 heatmap (window={args.betti_window}, stride={args.betti_stride}) "
+        f"for {model_key} layer {layer}."
     )
 
     # Note: PaCE support-set churn plots will be added once sparse codes are integrated.

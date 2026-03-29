@@ -192,3 +192,58 @@ def load_activation_bundle(
         leaf
     )
     return trajectories, texts, labels, token_texts, generated_texts, cfg, leaf
+
+
+def save_persistence_diagram(diagram: np.ndarray, path: str) -> None:
+    """Save a single persistence diagram to HTML/PNG/SVG outputs.
+
+    The input must contain shape (n_bars, 2) with columns [birth, death].
+    """
+    if diagram.ndim != 2 or diagram.shape[1] != 2:
+        raise ValueError("diagram must have shape (n_bars, 2).")
+
+    import plotly.graph_objects as go
+
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    finite = diagram[np.isfinite(diagram).all(axis=1)]
+    lim = 1.0
+    if finite.size:
+        lim = float(np.max(finite))
+        lim = max(1.0, lim)
+
+    fig = go.Figure()
+    if finite.size:
+        fig.add_trace(
+            go.Scatter(
+                x=finite[:, 0],
+                y=finite[:, 1],
+                mode="markers",
+                marker={"color": "darkorange", "size": 6, "opacity": 0.85},
+                name="bars",
+            )
+        )
+    fig.add_trace(
+        go.Scatter(
+            x=[0.0, lim],
+            y=[0.0, lim],
+            mode="lines",
+            line={"color": "black", "dash": "dash"},
+            name="birth=death",
+        )
+    )
+    fig.update_layout(
+        title="Persistence Diagram",
+        xaxis_title="Birth",
+        yaxis_title="Death",
+        template="plotly_white",
+    )
+    fig.write_html(str(out.with_suffix(".html")))
+    try:
+        fig.write_image(str(out.with_suffix(".png")))
+    except Exception:
+        pass
+    try:
+        fig.write_image(str(out.with_suffix(".svg")))
+    except Exception:
+        pass

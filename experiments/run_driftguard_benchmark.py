@@ -7,7 +7,7 @@ import argparse
 import json
 import random
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -183,7 +183,6 @@ def _run_benchmark_condition(
     load_4bit: bool,
     cfg: DriftGuardConfig,
     preset: str,
-    judge_generations: bool,
 ) -> dict[str, Any]:
     cases = PRESETS[preset]
     model, tokenizer = load_model_and_tokenizer(
@@ -199,23 +198,8 @@ def _run_benchmark_condition(
         layer_idx=cfg.layer_idx,
     )
 
-    judge = None
-    if judge_generations:
-        from latent_dynamics.cli import DEFAULT_GENERATION_JUDGE_MODEL
-        from latent_dynamics.judge import SafetyJudge
-
-        judge = SafetyJudge(
-            model=DEFAULT_GENERATION_JUDGE_MODEL,
-            max_concurrency=8,
-            batch_size=16,
-            requests_per_minute=120,
-            show_progress=False,
-        )
-
     by_mode: dict[str, list[dict[str, Any]]] = {"no_steer": [], "steer": []}
     for mode_name, reference in (("no_steer", None), ("steer", safe_reference)):
-        prompts = [c.prompt for c in cases]
-        generations: list[str] = []
         for case in cases:
             result = run_driftguard_session(
                 model=model,
@@ -226,7 +210,6 @@ def _run_benchmark_condition(
                 safe_reference=reference,
             )
             step_scores = [float(s.risk_score) for s in result.steps]
-            generations.append(result.generated_text)
             by_mode[mode_name].append(
                 {
                     "tag": case.tag,
@@ -258,20 +241,6 @@ def _run_benchmark_condition(
                 }
             )
 
-        if judge is not None:
-            from latent_dynamics.judge import judge_prompt_generations
-
-            judged = judge_prompt_generations(
-                prompts=prompts,
-                generations=generations,
-                judge=judge,
-                cache=None,
-            )
-            for rec, jres in zip(by_mode[mode_name], judged, strict=False):
-                rec["judge_unsafe_output"] = int(jres.unsafe)
-                rec["judge_compliance_output"] = int(jres.compliance)
-                rec["judge_confidence"] = float(jres.confidence)
-
     summary: dict[str, Any] = {}
     for mode_name, rows in by_mode.items():
         y_true = np.asarray([int(r["unsafe_label"]) for r in rows], dtype=np.int64)
@@ -289,24 +258,12 @@ def _run_benchmark_condition(
         benign_alarm_rate = _mean_or_none([float(r["alarm"]) for r in benign_rows])
         mean_latency = _mean_or_none([float(r["mean_step_latency_ms"]) for r in rows])
 
-        unsafe_output_rate = None
-        compliance_benign_rate = None
-        if rows and "judge_unsafe_output" in rows[0]:
-            unsafe_output_rate = _mean_or_none(
-                [float(r["judge_unsafe_output"]) for r in unsafe_rows]
-            )
-            compliance_benign_rate = _mean_or_none(
-                [float(r["judge_compliance_output"]) for r in benign_rows]
-            )
-
         summary[mode_name] = {
             "detection": det,
             "lead_time_mean": _mean_or_none(lead_times),
             "lead_time_std": _std_or_none(lead_times),
             "benign_alarm_rate": benign_alarm_rate,
             "mean_step_latency_ms": mean_latency,
-            "unsafe_output_rate": unsafe_output_rate,
-            "benign_compliance_rate": compliance_benign_rate,
         }
 
     steer = summary["steer"]
@@ -322,25 +279,12 @@ def _run_benchmark_condition(
             if steer["lead_time_mean"] is None or no_steer["lead_time_mean"] is None
             else float(steer["lead_time_mean"] - no_steer["lead_time_mean"])
         ),
-        "delta_unsafe_output_rate": (
-            None
-            if steer["unsafe_output_rate"] is None or no_steer["unsafe_output_rate"] is None
-            else float(steer["unsafe_output_rate"] - no_steer["unsafe_output_rate"])
-        ),
-        "delta_benign_compliance_rate": (
-            None
-            if steer["benign_compliance_rate"] is None
-            or no_steer["benign_compliance_rate"] is None
-            else float(
-                steer["benign_compliance_rate"] - no_steer["benign_compliance_rate"]
-            )
-        ),
     }
 
     return {
         "preset": preset,
         "quantization": "4bit" if load_4bit else "bf16_or_fp16",
-        "config": asdict(cfg),
+        "config": cfg.model_dump(),
         "summary": summary,
         "sessions": by_mode,
     }
@@ -372,11 +316,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--topology-weight", type=float, default=0.25)
     parser.add_argument("--steering-strength", type=float, default=0.20)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--judge-generations",
-        action="store_true",
-        help="Use LLM-as-judge to estimate unsafe output/compliance rates.",
-    )
     parser.add_argument(
         "--quantization-sweep",
         action="store_true",
@@ -423,7 +362,6 @@ def main() -> None:
                 load_4bit=load_4bit,
                 cfg=cfg,
                 preset=args.preset,
-                judge_generations=args.judge_generations,
             )
         )
 
