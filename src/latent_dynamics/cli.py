@@ -116,7 +116,7 @@ def extract(
     from tqdm.auto import tqdm
 
     from latent_dynamics.activations import extract_multi_layer_trajectories
-    from latent_dynamics.config import RunConfig
+    from latent_dynamics.config import DriftGuardConfig
     from latent_dynamics.data import load_examples, prepare_text_and_labels
     from latent_dynamics.hub import (
         METADATA_FILE,
@@ -146,7 +146,7 @@ def extract(
     else:
         layer_indices = [5]
 
-    cfg = RunConfig(
+    cfg = DriftGuardConfig(
         model_key=model.value,
         dataset_key=dataset.value,
         max_samples=max_samples,
@@ -263,7 +263,7 @@ def extract(
         extra_metadata["example_metadata"] = metadata
 
     for li in extracted_layers:
-        layer_cfg = RunConfig(**{**cfg.model_dump(), "layer_idx": li})
+        layer_cfg = DriftGuardConfig(**{**cfg.model_dump(), "layer_idx": li})
         write_trajectory_shard_manifest(
             output_dir=layer_dirs[li],
             entries=shard_manifest_entries_by_layer[li],
@@ -371,8 +371,8 @@ def run_driftguard_session_cmd(
         typer.Option(
             "--nnsight-fail-open/--no-nnsight-fail-open",
             help=(
-                "If nnsight steering raises at runtime, fall back to direct "
-                "hidden-space steering instead of failing."
+                "If nnsight steering raises at runtime, skip steering for that step "
+                "instead of failing the full session."
             ),
         ),
     ] = True,
@@ -486,6 +486,10 @@ def run_driftguard_session_cmd(
         "first_alarm_token": result.first_alarm_token,
         "first_alarm_lead_time": result.first_alarm_lead_time,
         "mean_step_latency_ms": result.mean_step_latency_ms,
+        "tda_attempted_steps": result.tda_attempted_steps,
+        "tda_executed_steps": result.tda_executed_steps,
+        "tda_skipped_budget_steps": result.tda_skipped_budget_steps,
+        "tda_skipped_stride_steps": result.tda_skipped_stride_steps,
         "steps": [
             {
                 "token_id": s.token_id,

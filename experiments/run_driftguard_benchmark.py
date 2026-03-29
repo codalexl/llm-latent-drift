@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from sklearn.metrics import auc, precision_recall_curve, roc_auc_score
+from sklearn.metrics import auc, precision_recall_curve, roc_auc_score, roc_curve
 
 import torch
 
@@ -27,6 +27,7 @@ from latent_dynamics.online_runtime import (
     estimate_safe_reference,
     run_driftguard_session,
 )
+from latent_dynamics.tda_metrics import compute_risk_score
 
 
 @dataclass
@@ -177,6 +178,64 @@ def _classification_metrics(
     }
 
 
+def _risk_profiles(cfg: DriftGuardConfig) -> dict[str, DriftGuardConfig]:
+    cl_total = max(cfg.continuity_weight + cfg.lipschitz_weight, 1e-8)
+    cl_cont = float(cfg.continuity_weight / cl_total)
+    cl_lip = float(cfg.lipschitz_weight / cl_total)
+    return {
+        "full": cfg,
+        "cosine_lipschitz_only": cfg.model_copy(
+            update={
+                "continuity_weight": cl_cont,
+                "lipschitz_weight": cl_lip,
+                "topology_weight": 0.0,
+            }
+        ),
+        "cosine_only": cfg.model_copy(
+            update={
+                "continuity_weight": 1.0,
+                "lipschitz_weight": 0.0,
+                "topology_weight": 0.0,
+            }
+        ),
+        "lipschitz_only": cfg.model_copy(
+            update={
+                "continuity_weight": 0.0,
+                "lipschitz_weight": 1.0,
+                "topology_weight": 0.0,
+            }
+        ),
+        "topology_only": cfg.model_copy(
+            update={
+                "continuity_weight": 0.0,
+                "lipschitz_weight": 0.0,
+                "topology_weight": 1.0,
+            }
+        ),
+    }
+
+
+def _max_ablation_score(session_row: dict[str, Any], profile_cfg: DriftGuardConfig) -> float:
+    vals: list[float] = []
+    for step in session_row["steps"]:
+        vals.append(
+            float(
+                compute_risk_score(
+                    {
+                        "cosine_cont": step.get("cosine_continuity"),
+                        "lipschitz": step.get("lipschitz_proxy"),
+                        "cloud_diameter": step.get("topology_diameter"),
+                        "beta0": step.get("topology_beta0"),
+                        "beta1": step.get("topology_beta1"),
+                        "persistence_l1": step.get("topology_persistence_l1"),
+                    },
+                    config=profile_cfg,
+                )
+            )
+        )
+    return max(vals) if vals else 0.0
+
+
 def _run_benchmark_condition(
     model_key: str,
     device: str,
@@ -223,6 +282,10 @@ def _run_benchmark_condition(
                     "first_alarm_token": result.first_alarm_token,
                     "first_alarm_lead_time": result.first_alarm_lead_time,
                     "mean_step_latency_ms": result.mean_step_latency_ms,
+                    "tda_attempted_steps": result.tda_attempted_steps,
+                    "tda_executed_steps": result.tda_executed_steps,
+                    "tda_skipped_budget_steps": result.tda_skipped_budget_steps,
+                    "tda_skipped_stride_steps": result.tda_skipped_stride_steps,
                     "steps": [
                         {
                             "token_id": int(s.token_id),
@@ -231,6 +294,7 @@ def _run_benchmark_condition(
                             "topology_diameter": s.topology_diameter,
                             "topology_beta0": s.topology_beta0,
                             "topology_beta1": s.topology_beta1,
+                            "topology_persistence_l1": s.topology_persistence_l1,
                             "risk_score": float(s.risk_score),
                             "alarm": bool(s.alarm),
                             "steered": bool(s.steered),
@@ -257,6 +321,14 @@ def _run_benchmark_condition(
         ]
         benign_alarm_rate = _mean_or_none([float(r["alarm"]) for r in benign_rows])
         mean_latency = _mean_or_none([float(r["mean_step_latency_ms"]) for r in rows])
+        tda_attempted = _mean_or_none([float(r["tda_attempted_steps"]) for r in rows])
+        tda_executed = _mean_or_none([float(r["tda_executed_steps"]) for r in rows])
+        tda_skipped_budget = _mean_or_none(
+            [float(r["tda_skipped_budget_steps"]) for r in rows]
+        )
+        tda_skipped_stride = _mean_or_none(
+            [float(r["tda_skipped_stride_steps"]) for r in rows]
+        )
 
         summary[mode_name] = {
             "detection": det,
@@ -264,7 +336,22 @@ def _run_benchmark_condition(
             "lead_time_std": _std_or_none(lead_times),
             "benign_alarm_rate": benign_alarm_rate,
             "mean_step_latency_ms": mean_latency,
+            "mean_tda_attempted_steps": tda_attempted,
+            "mean_tda_executed_steps": tda_executed,
+            "mean_tda_skipped_budget_steps": tda_skipped_budget,
+            "mean_tda_skipped_stride_steps": tda_skipped_stride,
         }
+        if len(np.unique(y_true)) > 1:
+            fpr, tpr, _ = roc_curve(y_true, y_score)
+            prec, rec, _ = precision_recall_curve(y_true, y_score)
+            summary[mode_name]["roc_curve"] = {
+                "fpr": [float(x) for x in fpr],
+                "tpr": [float(x) for x in tpr],
+            }
+            summary[mode_name]["pr_curve"] = {
+                "precision": [float(x) for x in prec],
+                "recall": [float(x) for x in rec],
+            }
 
     steer = summary["steer"]
     no_steer = summary["no_steer"]
@@ -280,6 +367,32 @@ def _run_benchmark_condition(
             else float(steer["lead_time_mean"] - no_steer["lead_time_mean"])
         ),
     }
+
+    steer_rows = by_mode["steer"]
+    y_true = np.asarray([int(r["unsafe_label"]) for r in steer_rows], dtype=np.int64)
+    profile_cfgs = _risk_profiles(cfg)
+    ablations: dict[str, Any] = {}
+    for name, profile_cfg in profile_cfgs.items():
+        y_score = np.asarray(
+            [_max_ablation_score(r, profile_cfg) for r in steer_rows],
+            dtype=np.float64,
+        )
+        y_pred = (y_score >= profile_cfg.risk_threshold).astype(np.int64)
+        metrics = _classification_metrics(y_true, y_pred, y_score)
+        item: dict[str, Any] = {"detection": metrics}
+        if len(np.unique(y_true)) > 1:
+            fpr, tpr, _ = roc_curve(y_true, y_score)
+            prec, rec, _ = precision_recall_curve(y_true, y_score)
+            item["roc_curve"] = {
+                "fpr": [float(x) for x in fpr],
+                "tpr": [float(x) for x in tpr],
+            }
+            item["pr_curve"] = {
+                "precision": [float(x) for x in prec],
+                "recall": [float(x) for x in rec],
+            }
+        ablations[name] = item
+    summary["ablations"] = ablations
 
     return {
         "preset": preset,

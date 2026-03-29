@@ -39,6 +39,17 @@ class DriftSessionResult:
     first_alarm_token: int | None
     first_alarm_lead_time: int | None
     mean_step_latency_ms: float
+    tda_attempted_steps: int
+    tda_executed_steps: int
+    tda_skipped_budget_steps: int
+    tda_skipped_stride_steps: int
+
+
+@dataclass
+class SteeringIntervention:
+    logits: torch.Tensor
+    steered: bool
+    delta_norm: float | None
 
 
 def _resolve_nnsight_layer_stack(model_obj: object) -> object:
@@ -96,6 +107,114 @@ def _lipschitz_proxy(x: torch.Tensor, y: torch.Tensor) -> float:
     num = torch.norm(x - y, p=2)
     den = torch.clamp(torch.norm(y, p=2), min=1e-8)
     return float((num / den).item())
+
+
+def _tda_within_budget(
+    elapsed_ms: float,
+    tda_latency_budget_ms: float,
+    estimated_tda_ms: float | None,
+) -> bool:
+    """Gate TDA work using current elapsed time + estimated TDA cost."""
+    estimate = max(float(estimated_tda_ms or 0.0), 0.0)
+    return (float(elapsed_ms) + estimate) <= float(tda_latency_budget_ms)
+
+
+def _steer_logits_hf(
+    model: object,
+    hidden: torch.Tensor,
+    logits_last: torch.Tensor,
+    safe_reference: torch.Tensor,
+    cfg: DriftGuardConfig,
+) -> SteeringIntervention:
+    steered_hidden, steering_result = steer_toward_reference(
+        hidden=hidden,
+        reference=safe_reference.to(hidden.device),
+        strength=cfg.steering_strength,
+    )
+    if not steering_result.applied:
+        return SteeringIntervention(
+            logits=logits_last,
+            steered=False,
+            delta_norm=steering_result.delta_norm,
+        )
+    output_head = model.get_output_embeddings()
+    base_logits = output_head(hidden)
+    steer_logits = output_head(steered_hidden)
+    return SteeringIntervention(
+        logits=logits_last + (steer_logits - base_logits),
+        steered=True,
+        delta_norm=steering_result.delta_norm,
+    )
+
+
+def _steer_logits_nnsight(
+    nns_model: object,
+    prompt: str,
+    logits_last: torch.Tensor,
+    safe_reference: torch.Tensor,
+    cfg: DriftGuardConfig,
+) -> SteeringIntervention:
+    try:
+        steer_out = steer_with_nnsight(
+            nns_model=nns_model,
+            prompt=prompt,
+            safe_ref_hidden=safe_reference,
+            layer_idx=cfg.layer_idx,
+            alpha=cfg.steering_strength,
+        )
+        logits_for_sample = torch.as_tensor(steer_out["logits"]).to(logits_last.device)
+        delta_norm = float(torch.norm(logits_for_sample - logits_last, p=2).item())
+        if delta_norm <= 1e-8:
+            raise RuntimeError("nnsight steering produced zero logit delta.")
+        return SteeringIntervention(
+            logits=logits_for_sample,
+            steered=True,
+            delta_norm=delta_norm,
+        )
+    except Exception:
+        if not cfg.nnsight_fail_open:
+            raise
+        return SteeringIntervention(logits=logits_last, steered=False, delta_norm=None)
+
+
+def _apply_steering_intervention(
+    backend: str,
+    cfg: DriftGuardConfig,
+    device: str,
+    logits_last: torch.Tensor,
+    hidden: torch.Tensor,
+    safe_reference: torch.Tensor,
+    model: object | None = None,
+    nns_model: object | None = None,
+    prompt: str | None = None,
+) -> SteeringIntervention:
+    """Single steering abstraction used by both HF and nnsight runtimes."""
+    if backend == "hf":
+        if model is None:
+            raise ValueError("HF steering backend requires model.")
+        result = _steer_logits_hf(
+            model=model,
+            hidden=hidden,
+            logits_last=logits_last,
+            safe_reference=safe_reference,
+            cfg=cfg,
+        )
+    elif backend == "nnsight":
+        if nns_model is None or prompt is None:
+            raise ValueError("nnsight steering backend requires model and prompt.")
+        result = _steer_logits_nnsight(
+            nns_model=nns_model,
+            prompt=prompt,
+            logits_last=logits_last,
+            safe_reference=safe_reference,
+            cfg=cfg,
+        )
+    else:
+        raise ValueError(f"Unknown steering backend: {backend}")
+
+    if result.steered and cfg.clear_cache_after_steer:
+        _maybe_clear_device_cache(device)
+    return result
 
 
 def _next_token_id(logits: torch.Tensor, do_sample: bool, temperature: float) -> int:
@@ -172,6 +291,11 @@ def run_driftguard_session(
     generated: list[int] = []
     steps: list[DriftStep] = []
     risk_cfg = cfg
+    tda_attempted_steps = 0
+    tda_executed_steps = 0
+    tda_skipped_budget_steps = 0
+    tda_skipped_stride_steps = 0
+    tda_estimated_ms: float | None = None
 
     for step_idx in range(cfg.max_new_tokens):
         t0 = perf_counter()
@@ -199,16 +323,23 @@ def run_driftguard_session(
             cos = _cosine(hidden, prev_hidden)
             lip = _lipschitz_proxy(hidden, prev_hidden)
 
-        should_run_tda = (
-            cfg.tda_enabled
-            and len(hidden_history) >= cfg.topology_window
-            and ((perf_counter() - t0) * 1000.0) <= cfg.tda_latency_budget_ms
-            and (
-                step_idx % max(cfg.topology_stride, 1) == 0
-                or last_topology is None
-            )
+        has_window = len(hidden_history) >= cfg.topology_window
+        elapsed_ms = (perf_counter() - t0) * 1000.0
+        within_budget = _tda_within_budget(
+            elapsed_ms=elapsed_ms,
+            tda_latency_budget_ms=cfg.tda_latency_budget_ms,
+            estimated_tda_ms=tda_estimated_ms,
         )
+        stride_hit = step_idx % max(cfg.topology_stride, 1) == 0 or last_topology is None
+        should_run_tda = cfg.tda_enabled and has_window and within_budget and stride_hit
+        if cfg.tda_enabled and has_window:
+            tda_attempted_steps += 1
+            if not within_budget:
+                tda_skipped_budget_steps += 1
+            elif not stride_hit:
+                tda_skipped_stride_steps += 1
         if should_run_tda:
+            tda_t0 = perf_counter()
             window = np.asarray(list(hidden_history), dtype=np.float32)
             last_topology = topology_snapshot(
                 window,
@@ -216,6 +347,13 @@ def run_driftguard_session(
                 pca_components=cfg.pca_components,
                 tda_enabled=cfg.tda_enabled,
             )
+            tda_executed_steps += 1
+            tda_elapsed_ms = (perf_counter() - tda_t0) * 1000.0
+            if tda_estimated_ms is None:
+                tda_estimated_ms = float(tda_elapsed_ms)
+            else:
+                # Light EMA keeps budget gating stable across jittery steps.
+                tda_estimated_ms = float(0.8 * tda_estimated_ms + 0.2 * tda_elapsed_ms)
         if last_topology is not None:
             topology_diam = last_topology.diameter
             topology_beta0 = last_topology.beta0
@@ -240,19 +378,19 @@ def run_driftguard_session(
         steering_delta_norm = None
         cache_reset_needed = False
         if alarm and safe_reference is not None:
-            steered_hidden, steering_result = steer_toward_reference(
+            steering_out = _apply_steering_intervention(
+                backend="hf",
+                cfg=cfg,
+                device=device,
+                logits_last=logits,
                 hidden=hidden,
-                reference=safe_reference.to(hidden.device),
-                strength=cfg.steering_strength,
+                safe_reference=safe_reference,
+                model=model,
             )
-            base_logits = model.get_output_embeddings()(hidden)
-            steer_logits = model.get_output_embeddings()(steered_hidden)
-            logits = logits + (steer_logits - base_logits)
-            steered = steering_result.applied
-            steering_delta_norm = steering_result.delta_norm
-            if steered and cfg.clear_cache_after_steer:
-                _maybe_clear_device_cache(device)
-                cache_reset_needed = True
+            logits = steering_out.logits
+            steered = steering_out.steered
+            steering_delta_norm = steering_out.delta_norm
+            cache_reset_needed = steered and cfg.clear_cache_after_steer
 
         token_id = _next_token_id(
             logits=logits,
@@ -313,6 +451,10 @@ def run_driftguard_session(
         first_alarm_token=first_alarm,
         first_alarm_lead_time=first_alarm_lead,
         mean_step_latency_ms=mean_latency,
+        tda_attempted_steps=tda_attempted_steps,
+        tda_executed_steps=tda_executed_steps,
+        tda_skipped_budget_steps=tda_skipped_budget_steps,
+        tda_skipped_stride_steps=tda_skipped_stride_steps,
     )
 
 
@@ -377,6 +519,11 @@ def run_driftguard_session_nnsight(
     generated: list[int] = []
     steps: list[DriftStep] = []
     risk_cfg = cfg
+    tda_attempted_steps = 0
+    tda_executed_steps = 0
+    tda_skipped_budget_steps = 0
+    tda_skipped_stride_steps = 0
+    tda_estimated_ms: float | None = None
 
     for step_idx in range(cfg.max_new_tokens):
         t0 = perf_counter()
@@ -419,16 +566,23 @@ def run_driftguard_session_nnsight(
             cos = _cosine(hidden, prev_hidden)
             lip = _lipschitz_proxy(hidden, prev_hidden)
 
-        should_run_tda = (
-            cfg.tda_enabled
-            and len(hidden_history) >= cfg.topology_window
-            and ((perf_counter() - t0) * 1000.0) <= cfg.tda_latency_budget_ms
-            and (
-                step_idx % max(cfg.topology_stride, 1) == 0
-                or last_topology is None
-            )
+        has_window = len(hidden_history) >= cfg.topology_window
+        elapsed_ms = (perf_counter() - t0) * 1000.0
+        within_budget = _tda_within_budget(
+            elapsed_ms=elapsed_ms,
+            tda_latency_budget_ms=cfg.tda_latency_budget_ms,
+            estimated_tda_ms=tda_estimated_ms,
         )
+        stride_hit = step_idx % max(cfg.topology_stride, 1) == 0 or last_topology is None
+        should_run_tda = cfg.tda_enabled and has_window and within_budget and stride_hit
+        if cfg.tda_enabled and has_window:
+            tda_attempted_steps += 1
+            if not within_budget:
+                tda_skipped_budget_steps += 1
+            elif not stride_hit:
+                tda_skipped_stride_steps += 1
         if should_run_tda:
+            tda_t0 = perf_counter()
             window = np.asarray(list(hidden_history), dtype=np.float32)
             last_topology = topology_snapshot(
                 window,
@@ -436,6 +590,12 @@ def run_driftguard_session_nnsight(
                 pca_components=cfg.pca_components,
                 tda_enabled=cfg.tda_enabled,
             )
+            tda_executed_steps += 1
+            tda_elapsed_ms = (perf_counter() - tda_t0) * 1000.0
+            if tda_estimated_ms is None:
+                tda_estimated_ms = float(tda_elapsed_ms)
+            else:
+                tda_estimated_ms = float(0.8 * tda_estimated_ms + 0.2 * tda_elapsed_ms)
         if last_topology is not None:
             topology_diam = last_topology.diameter
             topology_beta0 = last_topology.beta0
@@ -459,47 +619,19 @@ def run_driftguard_session_nnsight(
 
         logits_for_sample = logits_last
         if alarm and safe_reference is not None:
-            if cfg.nnsight_full_prefix_trace:
-                try:
-                    steer_out = steer_with_nnsight(
-                        nns_model=nns_model,
-                        prompt=running_text,
-                        safe_ref_hidden=safe_reference,
-                        layer_idx=cfg.layer_idx,
-                        alpha=cfg.steering_strength,
-                    )
-                    logits_for_sample = torch.as_tensor(steer_out["logits"]).to(logits_last.device)
-                    steering_delta_norm = float(torch.norm(logits_for_sample - logits_last, p=2).item())
-                    if steering_delta_norm <= 1e-8:
-                        raise RuntimeError("nnsight steering produced zero logit delta.")
-                    steered = True
-                except Exception:
-                    if not cfg.nnsight_fail_open:
-                        raise
-                    steered_hidden, steering_result = steer_toward_reference(
-                        hidden=hidden,
-                        reference=safe_reference.to(hidden.device),
-                        strength=cfg.steering_strength,
-                    )
-                    base_logits = nns_model.lm_head(hidden)
-                    steer_logits = nns_model.lm_head(steered_hidden)
-                    logits_for_sample = logits_last + (steer_logits - base_logits)
-                    steered = steering_result.applied
-                    steering_delta_norm = steering_result.delta_norm
-            else:
-                steered_hidden, steering_result = steer_toward_reference(
-                    hidden=hidden,
-                    reference=safe_reference.to(hidden.device),
-                    strength=cfg.steering_strength,
-                )
-                base_logits = nns_model.lm_head(hidden)
-                steer_logits = nns_model.lm_head(steered_hidden)
-                logits_for_sample = logits_last + (steer_logits - base_logits)
-                steered = steering_result.applied
-                steering_delta_norm = steering_result.delta_norm
-
-            if steered and cfg.clear_cache_after_steer:
-                _maybe_clear_device_cache(device)
+            steering_out = _apply_steering_intervention(
+                backend="nnsight",
+                cfg=cfg,
+                device=device,
+                logits_last=logits_last,
+                hidden=hidden,
+                safe_reference=safe_reference,
+                nns_model=nns_model,
+                prompt=running_text,
+            )
+            logits_for_sample = steering_out.logits
+            steered = steering_out.steered
+            steering_delta_norm = steering_out.delta_norm
 
         token_id = _next_token_id(
             logits=logits_for_sample,
@@ -546,4 +678,8 @@ def run_driftguard_session_nnsight(
         first_alarm_token=first_alarm,
         first_alarm_lead_time=first_alarm_lead,
         mean_step_latency_ms=mean_latency,
+        tda_attempted_steps=tda_attempted_steps,
+        tda_executed_steps=tda_executed_steps,
+        tda_skipped_budget_steps=tda_skipped_budget_steps,
+        tda_skipped_stride_steps=tda_skipped_stride_steps,
     )

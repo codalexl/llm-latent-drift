@@ -1,7 +1,11 @@
 import pytest
 import torch
 
-from latent_dynamics.online_runtime import DriftGuardConfig, _resolve_nnsight_layer_stack
+from latent_dynamics.online_runtime import (
+    DriftGuardConfig,
+    _resolve_nnsight_layer_stack,
+    _tda_within_budget,
+)
 
 
 class _LayersRoot:
@@ -37,3 +41,8 @@ def test_nnsight_guard_zero_delta_raises_when_fail_closed() -> None:
     with pytest.raises(RuntimeError):
         if delta_norm <= 1e-8:
             raise RuntimeError("nnsight steering produced zero logit delta.")
+
+
+def test_tda_budget_gate_accounts_for_estimated_cost() -> None:
+    assert _tda_within_budget(2.0, 5.0, 2.5)
+    assert not _tda_within_budget(3.0, 5.0, 2.5)

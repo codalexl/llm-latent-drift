@@ -80,6 +80,51 @@ def _plot_latency_bar(run: dict, out_path: Path) -> None:
     plt.close()
 
 
+def _plot_ablation_curves(run: dict, out_path: Path) -> None:
+    ablations = run["summary"].get("ablations", {})
+    if not ablations:
+        return
+    fig, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(12, 5))
+    drew_roc = False
+    drew_pr = False
+    for profile, payload in ablations.items():
+        roc = payload.get("roc_curve")
+        auroc = payload.get("detection", {}).get("auroc")
+        label = f"{profile} (AUROC={auroc:.3f})" if auroc is not None else profile
+        if roc:
+            fpr = np.asarray(roc.get("fpr", []), dtype=np.float32)
+            tpr = np.asarray(roc.get("tpr", []), dtype=np.float32)
+            if fpr.size > 0 and tpr.size > 0:
+                ax_roc.plot(fpr, tpr, linewidth=2, label=label)
+                drew_roc = True
+        pr = payload.get("pr_curve")
+        if pr:
+            recall = np.asarray(pr.get("recall", []), dtype=np.float32)
+            precision = np.asarray(pr.get("precision", []), dtype=np.float32)
+            if recall.size > 0 and precision.size > 0:
+                ax_pr.plot(recall, precision, linewidth=2, label=label)
+                drew_pr = True
+    if not drew_roc and not drew_pr:
+        plt.close(fig)
+        return
+    if drew_roc:
+        ax_roc.plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
+    ax_roc.set_xlabel("False positive rate")
+    ax_roc.set_ylabel("True positive rate")
+    ax_roc.set_title("Ablation ROC")
+    if drew_roc:
+        ax_roc.legend(fontsize=8)
+    ax_pr.set_xlabel("Recall")
+    ax_pr.set_ylabel("Precision")
+    ax_pr.set_title("Ablation PR")
+    if drew_pr:
+        ax_pr.legend(fontsize=8)
+    fig.suptitle("Risk score ablations: ROC and PR curves")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
 def _plot_pca_paths(activations: Path, out_path: Path) -> None:
     trajectories, _texts, labels, _tokens, _gen, _cfg = load_activations(activations)
     if labels is None:
@@ -143,6 +188,7 @@ def main() -> None:
     _plot_cosine_heatmap(run, args.out_dir / "driftguard_cosine_heatmap.png")
     _plot_lead_time_hist(run, args.out_dir / "driftguard_lead_time_hist.png")
     _plot_latency_bar(run, args.out_dir / "driftguard_latency_bar.png")
+    _plot_ablation_curves(run, args.out_dir / "driftguard_ablation_roc.png")
     if args.activations is not None:
         _plot_pca_paths(args.activations, args.out_dir / "driftguard_pca_paths.png")
         _plot_persistence_diagram(
