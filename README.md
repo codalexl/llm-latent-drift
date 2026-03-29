@@ -58,7 +58,16 @@ uv run python experiments/run_driftguard_benchmark.py \
   --output-json experiments/outputs/driftguard_benchmark.json
 ```
 
-### 5) Generate benchmark figures
+### 5) Calibrate DriftGuard risk scores (label-driven)
+```bash
+uv run latent-dynamics calibrate \
+  --model-key gemma3_4b \
+  --dataset-key toy_contrastive \
+  --max-samples 24 \
+  --output calibration_results.json
+```
+
+### 6) Generate benchmark figures
 ```bash
 uv run python experiments/plot_driftguard_benchmark.py \
   --report-json experiments/outputs/driftguard_benchmark.json \
@@ -81,4 +90,5 @@ uv run python experiments/plot_driftguard_benchmark.py \
 
 - For static PNG export from Plotly, install `kaleido`.
 - 4-bit loading requires CUDA-compatible `bitsandbytes`.
+- Calibration in this repository is fully label-driven and does not use an LLM judge pipeline.
 

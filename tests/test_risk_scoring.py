@@ -1,3 +1,5 @@
+from hypothesis import given, strategies as st
+
 from latent_dynamics.config import DriftGuardConfig
 from latent_dynamics.tda_metrics import compute_risk_score
 
@@ -29,3 +31,31 @@ def test_high_risk_regime_scores_higher() -> None:
     assert unsafe > safe
     assert 0.0 <= safe <= 1.5
     assert 0.0 <= unsafe <= 1.5
+
+
+@given(st.floats(min_value=0.0, max_value=30.0))
+def test_topology_monotonicity_for_diameter(diam: float) -> None:
+    cfg = DriftGuardConfig()
+    base = compute_risk_score(
+        {
+            "cosine_cont": 0.97,
+            "lipschitz": 0.08,
+            "cloud_diameter": diam,
+            "beta0": 4,
+            "beta1": 0,
+            "persistence_l1": 0.2,
+        },
+        cfg,
+    )
+    higher = compute_risk_score(
+        {
+            "cosine_cont": 0.97,
+            "lipschitz": 0.08,
+            "cloud_diameter": diam + 1.0,
+            "beta0": 4,
+            "beta1": 0,
+            "persistence_l1": 0.2,
+        },
+        cfg,
+    )
+    assert higher >= base

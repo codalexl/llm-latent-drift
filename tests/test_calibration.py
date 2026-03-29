@@ -10,3 +10,13 @@ def test_calibration_reports_strong_auc_for_separable_scores() -> None:
     assert out["roc_auc"] > 0.85
     assert out["pr_auc"] > 0.85
     assert 0.0 <= out["best_threshold"] <= 1.5
+
+
+def test_calibration_output_has_weight_fields() -> None:
+    cfg = DriftGuardConfig()
+    out = summarize_calibration_from_scores(
+        scores=[0.1, 0.2, 0.8, 0.9],
+        labels=[0, 0, 1, 1],
+        cfg=cfg,
+    )
+    assert set(out["weights"].keys()) == {"continuity", "lipschitz", "topology"}

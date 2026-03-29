@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import inspect
 
 import numpy as np
 import torch
@@ -42,6 +43,18 @@ class DriftSessionResult:
 
 def _resolve_nnsight_layer_stack(model_obj: object) -> object:
     roots = [getattr(model_obj, "model", None), model_obj]
+    # Use inspect/static checks first to avoid triggering dynamic descriptors.
+    try:
+        attrs = set(dir(model_obj))
+    except Exception:
+        attrs = set()
+    if "model" in attrs:
+        try:
+            nested_model = inspect.getattr_static(model_obj, "model")
+            if nested_model is not None and hasattr(nested_model, "layers"):
+                return nested_model.layers
+        except Exception:
+            pass
     for root in roots:
         if root is None:
             continue

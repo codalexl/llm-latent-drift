@@ -17,9 +17,6 @@ app = typer.Typer(
     add_completion=False,
 )
 
-DEFAULT_GENERATION_JUDGE_MODEL = "gpt-5-mini"
-
-
 class ModelKey(str, Enum):
     llama_3_1_8b = "llama_3_1_8b"
     llama_3_1_70b = "llama_3_1_70b"
@@ -73,17 +70,6 @@ def extract(
     use_generate: Annotated[
         bool, typer.Option(help="Generate continuation before extracting.")
     ] = False,
-    judge_generations: Annotated[
-        bool,
-        typer.Option(
-            "--judge-generations",
-            help=(
-                "Judge generated responses and store judge labels in metadata. "
-                f"Uses {DEFAULT_GENERATION_JUDGE_MODEL}."
-            ),
-            is_flag=True,
-        ),
-    ] = False,
     max_new_tokens: Annotated[
         int, typer.Option(help="Tokens to generate (requires --use-generate).")
     ] = 256,
@@ -125,9 +111,7 @@ def extract(
       {output}/{dataset}/{model}/layer_{N}/
     Each layer directory contains a metadata.json that records the layer index,
     input prompts, and generated text (when using --use-generate) so that
-    activations can be matched back to their source data. With
-    --judge-generations, metadata also includes judge labels for unsafe and
-    compliance/refusal.
+    activations can be matched back to their source data.
     """
     from tqdm.auto import tqdm
 
@@ -144,18 +128,12 @@ def extract(
     from latent_dynamics.hub import (
         push_to_hub as _push,
     )
-    from latent_dynamics.judge import SafetyJudge, judge_prompt_generations
     from latent_dynamics.models import load_model_and_tokenizer, resolve_device
     from latent_dynamics.utils import (
         TRAJECTORY_SHARD_MANIFEST_FILE,
         list_trajectory_shards,
         write_trajectory_shard_manifest,
     )
-
-    if judge_generations and not use_generate:
-        raise typer.BadParameter(
-            "--judge-generations requires --use-generate so completions exist."
-        )
 
     if inference_batch_size < 1:
         raise typer.BadParameter("--inference-batch-size must be >= 1.")
@@ -250,20 +228,6 @@ def extract(
         li: [] for li in extracted_layers
     }
 
-    judge: SafetyJudge | None = None
-    judge_unsafe_labels: list[int] = []
-    judge_compliance_labels: list[int] = []
-    judge_confidences: list[float] = []
-    if judge_generations:
-        typer.echo(f"Initializing judge ({DEFAULT_GENERATION_JUDGE_MODEL})...")
-        judge = SafetyJudge(
-            model=DEFAULT_GENERATION_JUDGE_MODEL,
-            max_concurrency=12,
-            batch_size=32,
-            requests_per_minute=120,
-            show_progress=True,
-        )
-
     chunk_size = max(1, int(cfg.inference_batch_size))
     chunk_starts = range(0, len(texts), chunk_size)
     chunk_iter = tqdm(chunk_starts, desc="extract chunks", disable=len(texts) == 0)
@@ -279,19 +243,6 @@ def extract(
         )
         all_token_texts.extend(chunk_result.token_texts)
         all_generated_texts.extend(chunk_result.generated_texts)
-
-        if judge is not None:
-            chunk_judge_results = judge_prompt_generations(
-                prompts=chunk_texts,
-                generations=chunk_result.generated_texts,
-                judge=judge,
-                cache=None,
-            )
-            judge_unsafe_labels.extend(int(r.unsafe) for r in chunk_judge_results)
-            judge_compliance_labels.extend(
-                int(r.compliance) for r in chunk_judge_results
-            )
-            judge_confidences.extend(float(r.confidence) for r in chunk_judge_results)
 
         for li in extracted_layers:
             start_idx = next_idx_by_layer[li]
@@ -310,18 +261,6 @@ def extract(
     extra_metadata: dict[str, object] = {}
     if metadata is not None:
         extra_metadata["example_metadata"] = metadata
-
-    if judge is not None:
-        n_unsafe = sum(judge_unsafe_labels)
-        n_compliance = sum(judge_compliance_labels)
-        typer.echo(
-            f"Judge summary: unsafe={n_unsafe} safe={len(judge_unsafe_labels) - n_unsafe} "
-            f"compliance={n_compliance} refusal={len(judge_compliance_labels) - n_compliance}"
-        )
-        extra_metadata["judge_model"] = DEFAULT_GENERATION_JUDGE_MODEL
-        extra_metadata["judge_unsafe_labels"] = judge_unsafe_labels
-        extra_metadata["judge_compliance_labels"] = judge_compliance_labels
-        extra_metadata["judge_confidences"] = judge_confidences
 
     for li in extracted_layers:
         layer_cfg = RunConfig(**{**cfg.model_dump(), "layer_idx": li})
@@ -575,11 +514,11 @@ def run_driftguard_session_cmd(
 
 @app.command()
 def calibrate(
-    model: Annotated[
-        ModelKey, typer.Option(help="Model key from registry.")
+    model_key: Annotated[
+        ModelKey, typer.Option("--model-key", help="Model key from registry.")
     ] = ModelKey.gemma3_4b,
-    dataset: Annotated[
-        DatasetKey, typer.Option(help="Dataset key from registry.")
+    dataset_key: Annotated[
+        DatasetKey, typer.Option("--dataset-key", help="Dataset key from registry.")
     ] = DatasetKey.toy_contrastive,
     max_samples: Annotated[
         int, typer.Option(help="Maximum labeled samples for calibration run.")
@@ -606,15 +545,15 @@ def calibrate(
     from latent_dynamics.data import load_examples, prepare_text_and_labels
     from latent_dynamics.models import load_model_and_tokenizer, resolve_device
 
-    ds, spec = load_examples(dataset.value, max_samples=max_samples, stratify_labels=True, seed=random_seed)
+    ds, spec = load_examples(dataset_key.value, max_samples=max_samples, stratify_labels=True, seed=random_seed)
     texts, labels = prepare_text_and_labels(ds, spec)
     if labels is None:
         raise typer.BadParameter("Selected dataset does not provide labels for calibration.")
     resolved_device = resolve_device(device)
-    mdl, tokenizer = load_model_and_tokenizer(model.value, resolved_device, load_in_4bit=False)
+    mdl, tokenizer = load_model_and_tokenizer(model_key.value, resolved_device, load_in_4bit=False)
     cfg = DriftGuardConfig(
-        model_key=model.value,
-        dataset_key=dataset.value,
+        model_key=model_key.value,
+        dataset_key=dataset_key.value,
         layer_idx=layer_idx,
         max_new_tokens=max_new_tokens,
         random_seed=random_seed,
