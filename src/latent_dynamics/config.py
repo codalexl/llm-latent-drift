@@ -4,7 +4,7 @@ import warnings
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 
 class DriftGuardConfig(BaseModel):
@@ -38,7 +38,11 @@ class DriftGuardConfig(BaseModel):
     # Drift runtime / risk config.
     pca_components: int = Field(default=8, ge=1, le=64)
     tda_enabled: bool = True
-    tda_stride: int = Field(default=4, ge=1)
+    topology_stride: int = Field(
+        default=4,
+        ge=1,
+        validation_alias=AliasChoices("topology_stride", "tda_stride"),
+    )
     topology_window: int = Field(default=24, ge=4)
     tda_latency_budget_ms: float = Field(default=5.0, ge=0.0)
     cosine_floor: float = Field(default=0.96, ge=0.0, le=1.0)
@@ -68,6 +72,11 @@ class DriftGuardConfig(BaseModel):
                 "continuity_weight + lipschitz_weight + topology_weight must equal 1.0"
             )
         return self
+
+    @property
+    def tda_stride(self) -> int:
+        """Backward-compatible alias for topology_stride."""
+        return int(self.topology_stride)
 
 
 class RunConfig(DriftGuardConfig):

@@ -29,8 +29,8 @@ from latent_dynamics.activations import extract_multi_layer_trajectories
 from latent_dynamics.config import (
     DATASET_REGISTRY,
     DEFAULT_LAYERS,
+    DriftGuardConfig,
     MODEL_REGISTRY,
-    RunConfig,
 )
 from latent_dynamics.data import load_examples, prepare_text_and_labels
 from latent_dynamics.hub import (
@@ -151,7 +151,7 @@ def main() -> None:
         layer_list = [default_layer]
 
     device = resolve_device(args.device)
-    cfg = RunConfig(
+    cfg = DriftGuardConfig(
         model_key=model_key,
         dataset_key=dataset_key,
         max_samples=num_samples,
@@ -218,7 +218,7 @@ def main() -> None:
     for li in layer_list:
         sub = activation_subpath(dataset_key, model_key, li)
         out_dir = args.output / sub
-        layer_cfg = RunConfig(**{**cfg.__dict__, "layer_idx": li})
+        layer_cfg = DriftGuardConfig(**{**cfg.model_dump(), "layer_idx": li})
         save_activations(
             out_dir,
             per_layer[li],

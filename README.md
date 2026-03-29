@@ -66,6 +66,7 @@ uv run latent-dynamics calibrate \
   --max-samples 24 \
   --output calibration_results.json
 ```
+This command now performs a label-driven search over risk weights, topology scales, and threshold, then writes recommended config updates plus ROC/PR curves.
 
 ### 6) Generate benchmark figures
 ```bash
@@ -78,7 +79,7 @@ uv run python experiments/plot_driftguard_benchmark.py \
 ## Main outputs
 
 - `experiments/outputs/driftguard_benchmark.json`
-- `experiments/outputs/figures/` (cosine heatmap, lead-time distribution, latency bar, optional PCA/persistence)
+- `experiments/outputs/figures/` (cosine heatmap, lead-time distribution, latency bar, ablation ROC, optional PCA/persistence)
 - `activations/{dataset}/{model}/layer_{N}/` (trajectory shards + metadata)
 
 ## Reproducibility defaults

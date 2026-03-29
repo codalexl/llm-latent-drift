@@ -5,7 +5,12 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from sklearn.metrics import average_precision_score, roc_auc_score
+from sklearn.metrics import (
+    average_precision_score,
+    precision_recall_curve,
+    roc_auc_score,
+    roc_curve,
+)
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from latent_dynamics.config import DriftGuardConfig
@@ -55,7 +60,20 @@ def _weight_candidates(step: float = 0.1) -> list[tuple[float, float, float]]:
     return out
 
 
-def _decompose_risk(step: Any, cfg: DriftGuardConfig) -> tuple[float, float, float]:
+def _quantile_scales(values: np.ndarray) -> list[float]:
+    vals = np.asarray(values, dtype=np.float64)
+    vals = vals[np.isfinite(vals)]
+    vals = vals[vals > 1e-8]
+    if vals.size == 0:
+        return [1.0]
+    quants = np.quantile(vals, [0.5, 0.75, 0.9])
+    out = sorted({float(max(q, 1e-4)) for q in quants})
+    return out
+
+
+def _decompose_risk_raw(step: Any, cfg: DriftGuardConfig) -> tuple[float, float, np.ndarray]:
+    """Return unscaled per-step risk components for calibration search."""
+    # Raw continuity/lipschitz terms before scale normalization.
     continuity = 0.0
     if step.cosine_continuity is not None:
         continuity = max(0.0, cfg.cosine_floor - float(step.cosine_continuity)) / max(
@@ -68,18 +86,31 @@ def _decompose_risk(step: Any, cfg: DriftGuardConfig) -> tuple[float, float, flo
             cfg.lipschitz_ceiling,
             1e-6,
         )
-    topology = 0.0
+    topo_terms = np.zeros(4, dtype=np.float64)
     if step.topology_diameter is not None:
-        topology += 0.40 * (max(float(step.topology_diameter), 0.0) / max(cfg.topology_diameter_scale, 1e-6))
+        topo_terms[0] = max(float(step.topology_diameter), 0.0)
     if step.topology_persistence_l1 is not None:
-        topology += 0.30 * (
-            max(float(step.topology_persistence_l1), 0.0) / max(cfg.persistence_l1_scale, 1e-6)
-        )
+        topo_terms[1] = max(float(step.topology_persistence_l1), 0.0)
     if step.topology_beta0 is not None:
-        topology += 0.15 * (max(float(step.topology_beta0), 0.0) / max(cfg.beta0_scale, 1e-6))
+        topo_terms[2] = max(float(step.topology_beta0), 0.0)
     if step.topology_beta1 is not None:
-        topology += 0.15 * (max(float(step.topology_beta1), 0.0) / max(cfg.beta1_scale, 1e-6))
-    return continuity, lipschitz, min(topology, 2.0)
+        topo_terms[3] = max(float(step.topology_beta1), 0.0)
+    return continuity, lipschitz, topo_terms
+
+
+def _apply_scales(
+    raw: np.ndarray,
+    scales: tuple[float, float, float, float],
+) -> np.ndarray:
+    diam_s, p1_s, b0_s, b1_s = scales
+    # Keep the same topology decomposition weights, but learn the scales from labels.
+    topo = (
+        0.40 * (raw[:, 0] / max(diam_s, 1e-6))
+        + 0.30 * (raw[:, 1] / max(p1_s, 1e-6))
+        + 0.15 * (raw[:, 2] / max(b0_s, 1e-6))
+        + 0.15 * (raw[:, 3] / max(b1_s, 1e-6))
+    )
+    return np.clip(topo, 0.0, 2.0)
 
 
 def calibrate_risk_score(
@@ -91,14 +122,13 @@ def calibrate_risk_score(
     device: str,
     output_path: Path | str = "calibration_results.json",
 ) -> dict[str, Any]:
-    """Run labeled prompts and fit threshold diagnostics for online risk scores."""
+    """Run labeled prompts and fit weights/scales/threshold from labels."""
     if len(prompts) != len(labels):
         raise ValueError("prompts and labels must have equal length.")
     if not prompts:
         raise ValueError("calibration requires at least one prompt.")
 
-    per_prompt_max_risk: list[float] = []
-    per_prompt_components: list[tuple[float, float, float]] = []
+    prompt_components: list[tuple[float, float, np.ndarray]] = []
     for prompt in prompts:
         session = run_driftguard_session(
             model=model,
@@ -108,34 +138,66 @@ def calibrate_risk_score(
             device=device,
             safe_reference=None,
         )
-        comps = [_decompose_risk(step, cfg) for step in session.steps]
-        if comps:
-            c_vals = [c for c, _, _ in comps]
-            l_vals = [l for _, l, _ in comps]
-            t_vals = [t for _, _, t in comps]
-            per_prompt_components.append((max(c_vals), max(l_vals), max(t_vals)))
-        else:
-            per_prompt_components.append((0.0, 0.0, 0.0))
-        max_risk = max((step.risk_score for step in session.steps), default=0.0)
-        per_prompt_max_risk.append(float(max_risk))
+        comps = [_decompose_risk_raw(step, cfg) for step in session.steps]
+        if not comps:
+            prompt_components.append((0.0, 0.0, np.zeros(4, dtype=np.float64)))
+            continue
+        c_vals = [c for c, _, _ in comps]
+        l_vals = [l for _, l, _ in comps]
+        topo = np.stack([t for _, _, t in comps], axis=0)
+        prompt_components.append(
+            (
+                float(np.max(c_vals)),
+                float(np.max(l_vals)),
+                np.max(topo, axis=0).astype(np.float64),
+            )
+        )
 
     y = np.asarray(labels, dtype=np.int64)
-    comp = np.asarray(per_prompt_components, dtype=np.float64)
+    c_raw = np.asarray([x[0] for x in prompt_components], dtype=np.float64)
+    l_raw = np.asarray([x[1] for x in prompt_components], dtype=np.float64)
+    t_raw = np.stack([x[2] for x in prompt_components], axis=0)
     best_auc = -1.0
     best_weights = (
         float(cfg.continuity_weight),
         float(cfg.lipschitz_weight),
         float(cfg.topology_weight),
     )
-    best_scores = np.asarray(per_prompt_max_risk, dtype=np.float64)
+    best_scales = (
+        float(cfg.topology_diameter_scale),
+        float(cfg.persistence_l1_scale),
+        float(cfg.beta0_scale),
+        float(cfg.beta1_scale),
+    )
+    default_topology = _apply_scales(t_raw, best_scales)
+    best_scores = np.clip(
+        best_weights[0] * c_raw + best_weights[1] * l_raw + best_weights[2] * default_topology,
+        0.0,
+        1.5,
+    )
     if len(np.unique(y)) >= 2:
-        for c_w, l_w, t_w in _weight_candidates(step=0.1):
-            candidate = np.clip(c_w * comp[:, 0] + l_w * comp[:, 1] + t_w * comp[:, 2], 0.0, 1.5)
-            auc = float(roc_auc_score(y, candidate))
-            if auc > best_auc:
-                best_auc = auc
-                best_weights = (c_w, l_w, t_w)
-                best_scores = candidate
+        diam_grid = _quantile_scales(t_raw[:, 0])
+        p1_grid = _quantile_scales(t_raw[:, 1])
+        b0_grid = _quantile_scales(t_raw[:, 2])
+        b1_grid = _quantile_scales(t_raw[:, 3])
+
+        for diam_s in diam_grid:
+            for p1_s in p1_grid:
+                for b0_s in b0_grid:
+                    for b1_s in b1_grid:
+                        topo = _apply_scales(t_raw, (diam_s, p1_s, b0_s, b1_s))
+                        for c_w, l_w, t_w in _weight_candidates(step=0.1):
+                            candidate = np.clip(
+                                c_w * c_raw + l_w * l_raw + t_w * topo,
+                                0.0,
+                                1.5,
+                            )
+                            auc = float(roc_auc_score(y, candidate))
+                            if auc > best_auc:
+                                best_auc = auc
+                                best_weights = (c_w, l_w, t_w)
+                                best_scales = (diam_s, p1_s, b0_s, b1_s)
+                                best_scores = candidate
 
     result = summarize_calibration_from_scores(
         scores=best_scores,
@@ -146,6 +208,35 @@ def calibrate_risk_score(
         "continuity": best_weights[0],
         "lipschitz": best_weights[1],
         "topology": best_weights[2],
+    }
+    result["optimal_scales"] = {
+        "topology_diameter_scale": best_scales[0],
+        "persistence_l1_scale": best_scales[1],
+        "beta0_scale": best_scales[2],
+        "beta1_scale": best_scales[3],
+    }
+    if len(np.unique(y)) >= 2:
+        fpr, tpr, roc_th = roc_curve(y, best_scores)
+        pr_prec, pr_rec, pr_th = precision_recall_curve(y, best_scores)
+        result["roc_curve"] = {
+            "fpr": fpr.astype(float).tolist(),
+            "tpr": tpr.astype(float).tolist(),
+            "thresholds": roc_th.astype(float).tolist(),
+        }
+        result["pr_curve"] = {
+            "precision": pr_prec.astype(float).tolist(),
+            "recall": pr_rec.astype(float).tolist(),
+            "thresholds": pr_th.astype(float).tolist(),
+        }
+    result["recommended_config_update"] = {
+        "risk_threshold": float(result["best_threshold"]),
+        "continuity_weight": best_weights[0],
+        "lipschitz_weight": best_weights[1],
+        "topology_weight": best_weights[2],
+        "topology_diameter_scale": best_scales[0],
+        "persistence_l1_scale": best_scales[1],
+        "beta0_scale": best_scales[2],
+        "beta1_scale": best_scales[3],
     }
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)

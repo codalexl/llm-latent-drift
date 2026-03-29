@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from latent_dynamics.config import RunConfig
+from latent_dynamics.config import DriftGuardConfig
 
 METADATA_FILE = "metadata.json"
 TRAJECTORIES_FILE = "trajectories.safetensors"
@@ -157,7 +157,7 @@ def load_activation_bundle(
     np.ndarray | None,
     list[list[str]],
     list[str | None] | None,
-    RunConfig,
+    DriftGuardConfig,
     Path,
 ]:
     """Load activations either from local disk or a Hugging Face dataset repo."""

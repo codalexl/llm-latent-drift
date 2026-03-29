@@ -8,7 +8,7 @@ import torch
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from latent_dynamics.config import RunConfig
+from latent_dynamics.config import DriftGuardConfig
 from latent_dynamics.models import resolve_device
 
 # Global seeding for reproducible trajectory extraction.
@@ -78,7 +78,7 @@ def generate_full_sequence(
     model: AutoModelForCausalLM,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
-    cfg: RunConfig,
+    cfg: DriftGuardConfig,
     tokenizer: AutoTokenizer,
 ) -> torch.Tensor:
     gen_kwargs: dict = {
@@ -144,7 +144,7 @@ def _extract_multi_layer_true_batch(
     tokenizer: AutoTokenizer,
     texts: list[str],
     layer_indices: list[int],
-    cfg: RunConfig,
+    cfg: DriftGuardConfig,
     device: str,
     show_progress: bool,
 ) -> ExtractionResult:
@@ -244,7 +244,7 @@ def _extract_multi_layer_single(
     tokenizer: AutoTokenizer,
     texts: list[str],
     layer_indices: list[int],
-    cfg: RunConfig,
+    cfg: DriftGuardConfig,
     device: str,
     show_progress: bool,
 ) -> ExtractionResult:
@@ -320,7 +320,7 @@ def extract_multi_layer_trajectories(
     tokenizer: AutoTokenizer,
     texts: list[str],
     layer_indices: list[int] | None,
-    cfg: RunConfig,
+    cfg: DriftGuardConfig,
     show_progress: bool = True,
 ) -> ExtractionResult:
     """Collect trajectories for requested layers, with optional true batched inference.
@@ -359,7 +359,7 @@ def extract_hidden_trajectories(
     tokenizer: AutoTokenizer,
     texts: list[str],
     layer_idx: int,
-    cfg: RunConfig,
+    cfg: DriftGuardConfig,
 ) -> ExtractionResult:
     """Convenience wrapper for a single layer."""
     return extract_multi_layer_trajectories(

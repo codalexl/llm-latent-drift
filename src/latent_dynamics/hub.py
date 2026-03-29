@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 from safetensors.numpy import load_file, save_file
 
-from latent_dynamics.config import RunConfig
+from latent_dynamics.config import DriftGuardConfig
 from latent_dynamics.utils import (
     METADATA_FILE,
     TRAJECTORIES_FILE,
@@ -41,7 +41,7 @@ def _build_activation_metadata(
     texts: list[str],
     labels: np.ndarray | None,
     token_texts: list[list[str]],
-    cfg: RunConfig,
+    cfg: DriftGuardConfig,
     generated_texts: list[str | None] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -71,7 +71,7 @@ def write_activation_metadata(
     texts: list[str],
     labels: np.ndarray | None,
     token_texts: list[list[str]],
-    cfg: RunConfig,
+    cfg: DriftGuardConfig,
     generated_texts: list[str | None] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> Path:
@@ -123,7 +123,7 @@ def save_activations(
     texts: list[str],
     labels: np.ndarray | None,
     token_texts: list[list[str]],
-    cfg: RunConfig,
+    cfg: DriftGuardConfig,
     generated_texts: list[str | None] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> Path:
@@ -259,7 +259,7 @@ def load_activations(
     np.ndarray | None,
     list[list[str]],
     list[str | None] | None,
-    RunConfig,
+    DriftGuardConfig,
 ]:
     with open(input_dir / METADATA_FILE) as f:
         metadata = json.load(f)
@@ -316,7 +316,7 @@ def load_activations(
             n=n,
         )
     )
-    cfg = RunConfig(**cfg_dict)
+    cfg = DriftGuardConfig(**cfg_dict)
 
     return trajectories, texts, labels, token_texts, generated_texts, cfg
 
