@@ -1,20 +1,13 @@
 from __future__ import annotations
 
 import json
+import random
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, List, Optional
 
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    load_dotenv = None
-else:
-    _repo_env = Path(__file__).resolve().parents[2] / ".env"
-    if _repo_env.is_file():
-        load_dotenv(_repo_env, override=False)
-
 import typer
+import numpy as np
 
 from latent_dynamics.config import DATASET_REGISTRY, MODEL_REGISTRY
 
@@ -385,6 +378,17 @@ def run_driftguard_session_cmd(
     topology_stride: Annotated[
         int, typer.Option(help="Stride for TDA snapshot updates.")
     ] = 4,
+    tda_enabled: Annotated[
+        bool,
+        typer.Option(
+            "--tda-enabled/--no-tda-enabled",
+            help="Enable or disable ripser-based topology features.",
+        ),
+    ] = True,
+    pca_components: Annotated[
+        int,
+        typer.Option(help="PCA components used before topology metrics."),
+    ] = 8,
     topology_diameter_ceiling: Annotated[
         float, typer.Option(help="Ceiling for topology diameter risk term.")
     ] = 1.5,
@@ -410,6 +414,30 @@ def run_driftguard_session_cmd(
             help="Use nnsight tracing for hidden capture and steering interventions.",
         ),
     ] = False,
+    nnsight_full_prefix_trace: Annotated[
+        bool,
+        typer.Option(
+            "--nnsight-full-prefix-trace/--no-nnsight-full-prefix-trace",
+            help=(
+                "When using --use-nnsight, trace full running prefix each step "
+                "(higher fidelity, higher latency)."
+            ),
+        ),
+    ] = True,
+    nnsight_fail_open: Annotated[
+        bool,
+        typer.Option(
+            "--nnsight-fail-open/--no-nnsight-fail-open",
+            help=(
+                "If nnsight steering raises at runtime, fall back to direct "
+                "hidden-space steering instead of failing."
+            ),
+        ),
+    ] = True,
+    random_seed: Annotated[
+        int,
+        typer.Option(help="Random seed for numpy/torch/python RNGs."),
+    ] = 42,
     load_4bit: Annotated[
         bool,
         typer.Option(
@@ -442,6 +470,17 @@ def run_driftguard_session_cmd(
     )
 
     resolved_device = resolve_device(device)
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    try:
+        import torch
+
+        torch.manual_seed(random_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(random_seed)
+    except Exception:
+        pass
+
     mdl, tokenizer = load_model_and_tokenizer(
         model.value,
         resolved_device,
@@ -455,6 +494,8 @@ def run_driftguard_session_cmd(
         risk_threshold=risk_threshold,
         topology_window=topology_window,
         topology_stride=topology_stride,
+        tda_enabled=tda_enabled,
+        pca_components=pca_components,
         topology_diameter_ceiling=topology_diameter_ceiling,
         topology_beta1_ceiling=topology_beta1_ceiling,
         continuity_weight=continuity_weight,
@@ -462,6 +503,9 @@ def run_driftguard_session_cmd(
         topology_weight=topology_weight,
         steering_strength=steering_strength,
         use_nnsight=use_nnsight,
+        nnsight_full_prefix_trace=nnsight_full_prefix_trace,
+        nnsight_fail_open=nnsight_fail_open,
+        random_seed=random_seed,
     )
 
     safe_reference = None
@@ -516,9 +560,11 @@ def run_driftguard_session_cmd(
                 "topology_diameter": s.topology_diameter,
                 "topology_beta0": s.topology_beta0,
                 "topology_beta1": s.topology_beta1,
+                "topology_persistence_l1": s.topology_persistence_l1,
                 "risk_score": s.risk_score,
                 "alarm": s.alarm,
                 "steered": s.steered,
+                "steering_delta_norm": s.steering_delta_norm,
                 "latency_ms": s.latency_ms,
             }
             for s in result.steps

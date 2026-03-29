@@ -7,8 +7,9 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from time import perf_counter
 
+from latent_dynamics.config import Config
 from latent_dynamics.steering import steer_toward_reference, steer_with_nnsight
-from latent_dynamics.tda_metrics import topology_snapshot
+from latent_dynamics.tda_metrics import compute_risk_score, topology_snapshot
 
 
 @dataclass
@@ -22,6 +23,8 @@ class DriftGuardConfig:
     risk_threshold: float = 0.5
     topology_window: int = 24
     topology_stride: int = 4
+    tda_enabled: bool = True
+    pca_components: int = 8
     topology_diameter_ceiling: float = 1.50
     topology_beta1_ceiling: float = 1.00
     continuity_weight: float = 0.40
@@ -29,7 +32,10 @@ class DriftGuardConfig:
     topology_weight: float = 0.25
     steering_strength: float = 0.20
     use_nnsight: bool = False
+    nnsight_full_prefix_trace: bool = True
+    nnsight_fail_open: bool = True
     clear_cache_after_steer: bool = True
+    random_seed: int | None = None
 
 
 @dataclass
@@ -40,9 +46,11 @@ class DriftStep:
     topology_diameter: float | None
     topology_beta0: int | None
     topology_beta1: int | None
+    topology_persistence_l1: float | None
     risk_score: float
     alarm: bool
     steered: bool
+    steering_delta_norm: float | None = None
     latency_ms: float | None = None
 
 
@@ -109,46 +117,18 @@ def _next_token_id(logits: torch.Tensor, do_sample: bool, temperature: float) ->
     return int(torch.multinomial(probs, num_samples=1).item())
 
 
-def _compute_risk_score(
-    cfg: DriftGuardConfig,
-    cosine: float | None,
-    lipschitz: float | None,
-    topology_diameter: float | None,
-    topology_beta1: int | None,
-) -> float:
-    continuity_risk = 0.0
-    if cosine is not None:
-        continuity_risk = max(0.0, cfg.cosine_floor - cosine) / max(
-            1.0 - cfg.cosine_floor,
-            1e-6,
-        )
-
-    lipschitz_risk = 0.0
-    if lipschitz is not None:
-        lipschitz_risk = max(0.0, lipschitz - cfg.lipschitz_ceiling) / max(
-            cfg.lipschitz_ceiling,
-            1e-6,
-        )
-
-    topology_risk = 0.0
-    if topology_diameter is not None:
-        topology_risk += max(0.0, topology_diameter - cfg.topology_diameter_ceiling) / max(
-            cfg.topology_diameter_ceiling,
-            1e-6,
-        )
-    if topology_beta1 is not None:
-        topology_risk += max(0.0, float(topology_beta1) - cfg.topology_beta1_ceiling) / max(
-            cfg.topology_beta1_ceiling,
-            1e-6,
-        )
-    topology_risk = min(topology_risk, 2.0)
-
-    score = (
-        cfg.continuity_weight * continuity_risk
-        + cfg.lipschitz_weight * lipschitz_risk
-        + cfg.topology_weight * topology_risk
+def _to_risk_config(cfg: DriftGuardConfig) -> Config:
+    return Config(
+        pca_components=cfg.pca_components,
+        tda_enabled=cfg.tda_enabled,
+        tda_stride=cfg.topology_stride,
+        cosine_floor=cfg.cosine_floor,
+        lipschitz_ceiling=cfg.lipschitz_ceiling,
+        risk_threshold=cfg.risk_threshold,
+        continuity_weight=cfg.continuity_weight,
+        lipschitz_weight=cfg.lipschitz_weight,
+        topology_weight=cfg.topology_weight,
     )
-    return float(np.clip(score, 0.0, 1.5))
 
 
 def estimate_safe_reference(
@@ -188,6 +168,13 @@ def run_driftguard_session(
     device: str,
     safe_reference: torch.Tensor | None = None,
 ) -> DriftSessionResult:
+    """Run KV-cache online monitoring with optional latent steering."""
+    if cfg.random_seed is not None:
+        np.random.seed(cfg.random_seed)
+        torch.manual_seed(cfg.random_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(cfg.random_seed)
+
     encoded = tokenizer(prompt, return_tensors="pt")
     full_input_ids = encoded["input_ids"].to(device)
     full_attention_mask = encoded["attention_mask"].to(device)
@@ -197,8 +184,10 @@ def run_driftguard_session(
     past_key_values = None
     prev_hidden: torch.Tensor | None = None
     hidden_history: list[np.ndarray] = []
+    last_topology = None
     generated: list[int] = []
     steps: list[DriftStep] = []
+    risk_cfg = _to_risk_config(cfg)
 
     for step_idx in range(cfg.max_new_tokens):
         t0 = perf_counter()
@@ -221,31 +210,49 @@ def run_driftguard_session(
         topology_diam = None
         topology_beta0 = None
         topology_beta1 = None
+        topology_persistence_l1 = None
         if prev_hidden is not None:
             cos = _cosine(hidden, prev_hidden)
             lip = _lipschitz_proxy(hidden, prev_hidden)
 
-        if (
-            len(hidden_history) >= cfg.topology_window
-            and step_idx % max(cfg.topology_stride, 1) == 0
-        ):
+        should_run_tda = (
+            cfg.tda_enabled
+            and len(hidden_history) >= cfg.topology_window
+            and (
+                step_idx % max(cfg.topology_stride, 1) == 0
+                or last_topology is None
+            )
+        )
+        if should_run_tda:
             window = np.asarray(hidden_history[-cfg.topology_window :], dtype=np.float32)
-            topo = topology_snapshot(window)
-            topology_diam = topo.diameter
-            topology_beta0 = topo.beta0
-            topology_beta1 = topo.beta1
+            last_topology = topology_snapshot(
+                window,
+                config=risk_cfg,
+                pca_components=cfg.pca_components,
+                tda_enabled=cfg.tda_enabled,
+            )
+        if last_topology is not None:
+            topology_diam = last_topology.diameter
+            topology_beta0 = last_topology.beta0
+            topology_beta1 = last_topology.beta1
+            topology_persistence_l1 = last_topology.persistence_l1
 
-        risk_score = _compute_risk_score(
-            cfg=cfg,
-            cosine=cos,
-            lipschitz=lip,
-            topology_diameter=topology_diam,
-            topology_beta1=topology_beta1,
+        risk_score = compute_risk_score(
+            {
+                "cosine_cont": cos,
+                "lipschitz": lip,
+                "cloud_diameter": topology_diam,
+                "beta0": topology_beta0,
+                "beta1": topology_beta1,
+                "persistence_l1": topology_persistence_l1,
+            },
+            config=risk_cfg,
         )
         alarm = risk_score >= cfg.risk_threshold
 
         logits = out.logits[:, -1, :]
         steered = False
+        steering_delta_norm = None
         cache_reset_needed = False
         if alarm and safe_reference is not None:
             steered_hidden, steering_result = steer_toward_reference(
@@ -257,6 +264,7 @@ def run_driftguard_session(
             steer_logits = model.get_output_embeddings()(steered_hidden)
             logits = logits + (steer_logits - base_logits)
             steered = steering_result.applied
+            steering_delta_norm = steering_result.delta_norm
             if steered and cfg.clear_cache_after_steer:
                 _maybe_clear_device_cache(device)
                 cache_reset_needed = True
@@ -276,9 +284,11 @@ def run_driftguard_session(
                 topology_diameter=topology_diam,
                 topology_beta0=topology_beta0,
                 topology_beta1=topology_beta1,
+                topology_persistence_l1=topology_persistence_l1,
                 risk_score=risk_score,
                 alarm=alarm,
                 steered=steered,
+                steering_delta_norm=steering_delta_norm,
                 latency_ms=latency_ms,
             )
         )
@@ -364,15 +374,24 @@ def run_driftguard_session_nnsight(
     safe_reference: torch.Tensor | None = None,
 ) -> DriftSessionResult:
     """
-    nnsight-backed online drift loop using full-prefix decoding per step.
+    nnsight-backed online drift loop.
 
-    This path favors tracing fidelity over speed.
+    By default this path traces the full running prefix each step, which favors
+    tracing fidelity over speed.
     """
+    if cfg.random_seed is not None:
+        np.random.seed(cfg.random_seed)
+        torch.manual_seed(cfg.random_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(cfg.random_seed)
+
     running_text = prompt
     prev_hidden: torch.Tensor | None = None
     hidden_history: list[np.ndarray] = []
+    last_topology = None
     generated: list[int] = []
     steps: list[DriftStep] = []
+    risk_cfg = _to_risk_config(cfg)
 
     for step_idx in range(cfg.max_new_tokens):
         t0 = perf_counter()
@@ -410,42 +429,90 @@ def run_driftguard_session_nnsight(
         topology_diam = None
         topology_beta0 = None
         topology_beta1 = None
+        topology_persistence_l1 = None
         if prev_hidden is not None:
             cos = _cosine(hidden, prev_hidden)
             lip = _lipschitz_proxy(hidden, prev_hidden)
 
-        if (
-            len(hidden_history) >= cfg.topology_window
-            and step_idx % max(cfg.topology_stride, 1) == 0
-        ):
+        should_run_tda = (
+            cfg.tda_enabled
+            and len(hidden_history) >= cfg.topology_window
+            and (
+                step_idx % max(cfg.topology_stride, 1) == 0
+                or last_topology is None
+            )
+        )
+        if should_run_tda:
             window = np.asarray(hidden_history[-cfg.topology_window :], dtype=np.float32)
-            topo = topology_snapshot(window)
-            topology_diam = topo.diameter
-            topology_beta0 = topo.beta0
-            topology_beta1 = topo.beta1
+            last_topology = topology_snapshot(
+                window,
+                config=risk_cfg,
+                pca_components=cfg.pca_components,
+                tda_enabled=cfg.tda_enabled,
+            )
+        if last_topology is not None:
+            topology_diam = last_topology.diameter
+            topology_beta0 = last_topology.beta0
+            topology_beta1 = last_topology.beta1
+            topology_persistence_l1 = last_topology.persistence_l1
 
-        risk_score = _compute_risk_score(
-            cfg=cfg,
-            cosine=cos,
-            lipschitz=lip,
-            topology_diameter=topology_diam,
-            topology_beta1=topology_beta1,
+        risk_score = compute_risk_score(
+            {
+                "cosine_cont": cos,
+                "lipschitz": lip,
+                "cloud_diameter": topology_diam,
+                "beta0": topology_beta0,
+                "beta1": topology_beta1,
+                "persistence_l1": topology_persistence_l1,
+            },
+            config=risk_cfg,
         )
         alarm = risk_score >= cfg.risk_threshold
         steered = False
+        steering_delta_norm = None
 
         logits_for_sample = logits_last
         if alarm and safe_reference is not None:
-            steer_out = steer_with_nnsight(
-                nns_model=nns_model,
-                prompt=running_text,
-                safe_ref_hidden=safe_reference,
-                layer_idx=cfg.layer_idx,
-                alpha=cfg.steering_strength,
-            )
-            logits_for_sample = torch.as_tensor(steer_out["logits"]).to(logits_last.device)
-            steered = True
-            if cfg.clear_cache_after_steer:
+            if cfg.nnsight_full_prefix_trace:
+                try:
+                    steer_out = steer_with_nnsight(
+                        nns_model=nns_model,
+                        prompt=running_text,
+                        safe_ref_hidden=safe_reference,
+                        layer_idx=cfg.layer_idx,
+                        alpha=cfg.steering_strength,
+                    )
+                    logits_for_sample = torch.as_tensor(steer_out["logits"]).to(logits_last.device)
+                    steering_delta_norm = float(torch.norm(logits_for_sample - logits_last, p=2).item())
+                    if steering_delta_norm <= 1e-8:
+                        raise RuntimeError("nnsight steering produced zero logit delta.")
+                    steered = True
+                except Exception:
+                    if not cfg.nnsight_fail_open:
+                        raise
+                    steered_hidden, steering_result = steer_toward_reference(
+                        hidden=hidden,
+                        reference=safe_reference.to(hidden.device),
+                        strength=cfg.steering_strength,
+                    )
+                    base_logits = nns_model.lm_head(hidden)
+                    steer_logits = nns_model.lm_head(steered_hidden)
+                    logits_for_sample = logits_last + (steer_logits - base_logits)
+                    steered = steering_result.applied
+                    steering_delta_norm = steering_result.delta_norm
+            else:
+                steered_hidden, steering_result = steer_toward_reference(
+                    hidden=hidden,
+                    reference=safe_reference.to(hidden.device),
+                    strength=cfg.steering_strength,
+                )
+                base_logits = nns_model.lm_head(hidden)
+                steer_logits = nns_model.lm_head(steered_hidden)
+                logits_for_sample = logits_last + (steer_logits - base_logits)
+                steered = steering_result.applied
+                steering_delta_norm = steering_result.delta_norm
+
+            if steered and cfg.clear_cache_after_steer:
                 _maybe_clear_device_cache(device)
 
         token_id = _next_token_id(
@@ -463,9 +530,11 @@ def run_driftguard_session_nnsight(
                 topology_diameter=topology_diam,
                 topology_beta0=topology_beta0,
                 topology_beta1=topology_beta1,
+                topology_persistence_l1=topology_persistence_l1,
                 risk_score=risk_score,
                 alarm=alarm,
                 steered=steered,
+                steering_delta_norm=steering_delta_norm,
                 latency_ms=latency_ms,
             )
         )

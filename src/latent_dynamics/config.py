@@ -28,6 +28,25 @@ class RunConfig:
     inference_batch_size: int = 16
 
 
+@dataclass
+class Config:
+    """Config shared by topology and risk-scoring utilities."""
+
+    pca_components: int = 8
+    tda_enabled: bool = True
+    tda_stride: int = 4
+    cosine_floor: float = 0.96
+    lipschitz_ceiling: float = 0.20
+    risk_threshold: float = 0.5
+    continuity_weight: float = 0.40
+    lipschitz_weight: float = 0.35
+    topology_weight: float = 0.25
+    topology_diameter_scale: float = 20.0
+    persistence_l1_scale: float = 2.0
+    beta0_scale: float = 24.0
+    beta1_scale: float = 5.0
+
+
 MODEL_REGISTRY: dict[str, dict[str, Any]] = {
     "llama_3_1_8b": {
         "hf_id": "meta-llama/Llama-3.1-8B-Instruct",
