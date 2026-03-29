@@ -1,50 +1,93 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-@dataclass
-class RunConfig:
+
+class DriftGuardConfig(BaseModel):
+    """Single source of truth for DriftGuard extraction and runtime settings."""
+
+    model_config = ConfigDict(extra="allow")
+
+    # Extraction / training-prep config.
     model_key: str = "gemma3_4b"
     dataset_key: str = "toy_contrastive"
-    max_samples: int = 120
-    max_input_tokens: int = 256
+    max_samples: int = Field(default=120, ge=1)
+    max_input_tokens: int = Field(default=256, ge=1)
     layer_idx: int = 5
     pooling: str = "last"  # last | mean | max_norm
     direction_method: str = "probe_weight"  # probe_weight | mean_diff | pca
-    test_size: float = 0.25
-    calib_size: float = 0.25
+    test_size: float = Field(default=0.25, gt=0.0, lt=1.0)
+    calib_size: float = Field(default=0.25, gt=0.0, lt=1.0)
     random_state: int = 42
     device: str | None = None
 
+    # Generation defaults.
     use_generate: bool = False
-    max_new_tokens: int = 24
+    max_new_tokens: int = Field(default=24, ge=1)
     do_sample: bool = True
-    temperature: float = 0.6
-    top_p: float = 0.95
+    temperature: float = Field(default=0.6, gt=0.0)
+    top_p: float = Field(default=0.95, gt=0.0, le=1.0)
     include_prompt_in_trajectory: bool = True
     use_true_batch_inference: bool = False
-    inference_batch_size: int = 16
+    inference_batch_size: int = Field(default=16, ge=1)
 
-
-@dataclass
-class Config:
-    """Config shared by topology and risk-scoring utilities."""
-
-    pca_components: int = 8
+    # Drift runtime / risk config.
+    pca_components: int = Field(default=8, ge=1, le=64)
     tda_enabled: bool = True
-    tda_stride: int = 4
-    cosine_floor: float = 0.96
-    lipschitz_ceiling: float = 0.20
-    risk_threshold: float = 0.5
-    continuity_weight: float = 0.40
-    lipschitz_weight: float = 0.35
-    topology_weight: float = 0.25
-    topology_diameter_scale: float = 20.0
-    persistence_l1_scale: float = 2.0
-    beta0_scale: float = 24.0
-    beta1_scale: float = 5.0
+    tda_stride: int = Field(default=4, ge=1)
+    topology_window: int = Field(default=24, ge=4)
+    tda_latency_budget_ms: float = Field(default=5.0, ge=0.0)
+    cosine_floor: float = Field(default=0.96, ge=0.0, le=1.0)
+    lipschitz_ceiling: float = Field(default=0.20, ge=0.0)
+    risk_threshold: float = Field(default=0.5, ge=0.0, le=2.0)
+    continuity_weight: float = Field(default=0.40, ge=0.0, le=1.0)
+    lipschitz_weight: float = Field(default=0.35, ge=0.0, le=1.0)
+    topology_weight: float = Field(default=0.25, ge=0.0, le=1.0)
+    topology_diameter_scale: float = Field(default=20.0, gt=0.0)
+    persistence_l1_scale: float = Field(default=2.0, gt=0.0)
+    beta0_scale: float = Field(default=24.0, gt=0.0)
+    beta1_scale: float = Field(default=5.0, gt=0.0)
+    topology_diameter_ceiling: float = Field(default=1.50, gt=0.0)
+    topology_beta1_ceiling: float = Field(default=1.00, gt=0.0)
+    steering_strength: float = Field(default=0.20, ge=0.0, le=1.0)
+    use_nnsight: bool = False
+    nnsight_full_prefix_trace: bool = True
+    nnsight_fail_open: bool = True
+    clear_cache_after_steer: bool = True
+    random_seed: int | None = None
+
+    @model_validator(mode="after")
+    def _validate_weights(self) -> "DriftGuardConfig":
+        total = self.continuity_weight + self.lipschitz_weight + self.topology_weight
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                "continuity_weight + lipschitz_weight + topology_weight must equal 1.0"
+            )
+        return self
+
+
+class RunConfig(DriftGuardConfig):
+    def __init__(self, **data: Any) -> None:
+        warnings.warn(
+            "RunConfig is deprecated; use DriftGuardConfig instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(**data)
+
+
+class Config(DriftGuardConfig):
+    def __init__(self, **data: Any) -> None:
+        warnings.warn(
+            "Config is deprecated; use DriftGuardConfig instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(**data)
 
 
 MODEL_REGISTRY: dict[str, dict[str, Any]] = {

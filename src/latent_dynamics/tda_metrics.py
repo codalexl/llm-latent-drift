@@ -6,7 +6,7 @@ from collections.abc import Mapping
 
 import numpy as np
 
-from latent_dynamics.config import Config
+from latent_dynamics.config import DriftGuardConfig
 
 try:
     from scipy.spatial.distance import pdist
@@ -107,12 +107,12 @@ def persistence_summary(points: np.ndarray, maxdim: int = 1) -> tuple[int, int, 
 
 def topology_snapshot(
     points: np.ndarray,
-    config: Config | None = None,
+    config: DriftGuardConfig | None = None,
     *,
     pca_components: int | None = None,
     tda_enabled: bool | None = None,
 ) -> TopologySnapshot:
-    cfg = config or Config()
+    cfg = config or DriftGuardConfig()
     n_components = cfg.pca_components if pca_components is None else int(pca_components)
     do_tda = cfg.tda_enabled if tda_enabled is None else bool(tda_enabled)
     reduced = pca_reduce(points, n_components=n_components)
@@ -142,9 +142,12 @@ def topology_snapshot(
     )
 
 
-def compute_risk_score(metrics: Mapping[str, float | int | None], config: Config | None = None) -> float:
+def compute_risk_score(
+    metrics: Mapping[str, float | int | None],
+    config: DriftGuardConfig | None = None,
+) -> float:
     """Compute fused drift risk from continuity, smoothness, and topology terms."""
-    cfg = config or Config()
+    cfg = config or DriftGuardConfig()
     cosine = metrics.get("cosine_cont")
     lipschitz = metrics.get("lipschitz")
     cloud_diam = metrics.get("cloud_diameter")

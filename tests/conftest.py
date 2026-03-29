@@ -1,11 +1,11 @@
 import pytest
 
-from latent_dynamics.config import Config
+from latent_dynamics.config import DriftGuardConfig
 
 
 @pytest.fixture
-def config() -> Config:
-    return Config(
+def config() -> DriftGuardConfig:
+    return DriftGuardConfig(
         pca_components=8,
         tda_enabled=True,
         tda_stride=4,

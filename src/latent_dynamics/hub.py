@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -46,8 +45,9 @@ def _build_activation_metadata(
     generated_texts: list[str | None] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    cfg_payload = cfg.model_dump() if hasattr(cfg, "model_dump") else cfg.__dict__
     metadata = {
-        "config": asdict(cfg),
+        "config": cfg_payload,
         "texts": texts,
         "labels": labels.tolist() if labels is not None else None,
         "token_texts": token_texts,

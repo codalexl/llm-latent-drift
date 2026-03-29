@@ -1,9 +1,9 @@
-from latent_dynamics.config import Config
+from latent_dynamics.config import DriftGuardConfig
 from latent_dynamics.tda_metrics import compute_risk_score
 
 
 def test_high_risk_regime_scores_higher() -> None:
-    cfg = Config()
+    cfg = DriftGuardConfig()
     safe = compute_risk_score(
         {
             "cosine_cont": 0.99,

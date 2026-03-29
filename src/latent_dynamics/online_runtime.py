@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -7,35 +8,9 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from time import perf_counter
 
-from latent_dynamics.config import Config
+from latent_dynamics.config import DriftGuardConfig
 from latent_dynamics.steering import steer_toward_reference, steer_with_nnsight
 from latent_dynamics.tda_metrics import compute_risk_score, topology_snapshot
-
-
-@dataclass
-class DriftGuardConfig:
-    layer_idx: int = -1
-    max_new_tokens: int = 128
-    do_sample: bool = False
-    temperature: float = 0.7
-    cosine_floor: float = 0.96
-    lipschitz_ceiling: float = 0.20
-    risk_threshold: float = 0.5
-    topology_window: int = 24
-    topology_stride: int = 4
-    tda_enabled: bool = True
-    pca_components: int = 8
-    topology_diameter_ceiling: float = 1.50
-    topology_beta1_ceiling: float = 1.00
-    continuity_weight: float = 0.40
-    lipschitz_weight: float = 0.35
-    topology_weight: float = 0.25
-    steering_strength: float = 0.20
-    use_nnsight: bool = False
-    nnsight_full_prefix_trace: bool = True
-    nnsight_fail_open: bool = True
-    clear_cache_after_steer: bool = True
-    random_seed: int | None = None
 
 
 @dataclass
@@ -117,20 +92,6 @@ def _next_token_id(logits: torch.Tensor, do_sample: bool, temperature: float) ->
     return int(torch.multinomial(probs, num_samples=1).item())
 
 
-def _to_risk_config(cfg: DriftGuardConfig) -> Config:
-    return Config(
-        pca_components=cfg.pca_components,
-        tda_enabled=cfg.tda_enabled,
-        tda_stride=cfg.topology_stride,
-        cosine_floor=cfg.cosine_floor,
-        lipschitz_ceiling=cfg.lipschitz_ceiling,
-        risk_threshold=cfg.risk_threshold,
-        continuity_weight=cfg.continuity_weight,
-        lipschitz_weight=cfg.lipschitz_weight,
-        topology_weight=cfg.topology_weight,
-    )
-
-
 def estimate_safe_reference(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
@@ -161,7 +122,7 @@ def estimate_safe_reference(
 
 
 def run_driftguard_session(
-    model: AutoModelForCausalLM,
+    model: object,
     tokenizer: AutoTokenizer,
     prompt: str,
     cfg: DriftGuardConfig,
@@ -169,6 +130,16 @@ def run_driftguard_session(
     safe_reference: torch.Tensor | None = None,
 ) -> DriftSessionResult:
     """Run KV-cache online monitoring with optional latent steering."""
+    if cfg.use_nnsight and hasattr(model, "trace"):
+        return run_driftguard_session_nnsight(
+            nns_model=model,
+            tokenizer=tokenizer,
+            prompt=prompt,
+            cfg=cfg,
+            device=device,
+            safe_reference=safe_reference,
+        )
+
     if cfg.random_seed is not None:
         np.random.seed(cfg.random_seed)
         torch.manual_seed(cfg.random_seed)
@@ -183,11 +154,11 @@ def run_driftguard_session(
 
     past_key_values = None
     prev_hidden: torch.Tensor | None = None
-    hidden_history: list[np.ndarray] = []
+    hidden_history: deque[np.ndarray] = deque(maxlen=cfg.topology_window)
     last_topology = None
     generated: list[int] = []
     steps: list[DriftStep] = []
-    risk_cfg = _to_risk_config(cfg)
+    risk_cfg = cfg
 
     for step_idx in range(cfg.max_new_tokens):
         t0 = perf_counter()
@@ -218,13 +189,14 @@ def run_driftguard_session(
         should_run_tda = (
             cfg.tda_enabled
             and len(hidden_history) >= cfg.topology_window
+            and ((perf_counter() - t0) * 1000.0) <= cfg.tda_latency_budget_ms
             and (
                 step_idx % max(cfg.topology_stride, 1) == 0
                 or last_topology is None
             )
         )
         if should_run_tda:
-            window = np.asarray(hidden_history[-cfg.topology_window :], dtype=np.float32)
+            window = np.asarray(list(hidden_history), dtype=np.float32)
             last_topology = topology_snapshot(
                 window,
                 config=risk_cfg,
@@ -387,11 +359,11 @@ def run_driftguard_session_nnsight(
 
     running_text = prompt
     prev_hidden: torch.Tensor | None = None
-    hidden_history: list[np.ndarray] = []
+    hidden_history: deque[np.ndarray] = deque(maxlen=cfg.topology_window)
     last_topology = None
     generated: list[int] = []
     steps: list[DriftStep] = []
-    risk_cfg = _to_risk_config(cfg)
+    risk_cfg = cfg
 
     for step_idx in range(cfg.max_new_tokens):
         t0 = perf_counter()
@@ -437,13 +409,14 @@ def run_driftguard_session_nnsight(
         should_run_tda = (
             cfg.tda_enabled
             and len(hidden_history) >= cfg.topology_window
+            and ((perf_counter() - t0) * 1000.0) <= cfg.tda_latency_budget_ms
             and (
                 step_idx % max(cfg.topology_stride, 1) == 0
                 or last_topology is None
             )
         )
         if should_run_tda:
-            window = np.asarray(hidden_history[-cfg.topology_window :], dtype=np.float32)
+            window = np.asarray(list(hidden_history), dtype=np.float32)
             last_topology = topology_snapshot(
                 window,
                 config=risk_cfg,

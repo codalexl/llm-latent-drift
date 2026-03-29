@@ -324,7 +324,7 @@ def extract(
         extra_metadata["judge_confidences"] = judge_confidences
 
     for li in extracted_layers:
-        layer_cfg = RunConfig(**{**cfg.__dict__, "layer_idx": li})
+        layer_cfg = RunConfig(**{**cfg.model_dump(), "layer_idx": li})
         write_trajectory_shard_manifest(
             output_dir=layer_dirs[li],
             entries=shard_manifest_entries_by_layer[li],
@@ -378,6 +378,9 @@ def run_driftguard_session_cmd(
     topology_stride: Annotated[
         int, typer.Option(help="Stride for TDA snapshot updates.")
     ] = 4,
+    tda_latency_budget_ms: Annotated[
+        float, typer.Option(help="Per-step latency budget for running TDA.")
+    ] = 5.0,
     tda_enabled: Annotated[
         bool,
         typer.Option(
@@ -466,7 +469,6 @@ def run_driftguard_session_cmd(
         estimate_safe_reference,
         load_nnsight_model,
         run_driftguard_session,
-        run_driftguard_session_nnsight,
     )
 
     resolved_device = resolve_device(device)
@@ -494,6 +496,7 @@ def run_driftguard_session_cmd(
         risk_threshold=risk_threshold,
         topology_window=topology_window,
         topology_stride=topology_stride,
+        tda_latency_budget_ms=tda_latency_budget_ms,
         tda_enabled=tda_enabled,
         pca_components=pca_components,
         topology_diameter_ceiling=topology_diameter_ceiling,
@@ -518,30 +521,22 @@ def run_driftguard_session_cmd(
             layer_idx=layer_idx,
         )
 
+    active_model = mdl
     if use_nnsight:
         hf_id = MODEL_REGISTRY[model.value]["hf_id"]
-        nns_model = load_nnsight_model(
+        active_model = load_nnsight_model(
             model_path=hf_id,
             device_map="auto",
             load_in_4bit=bool(load_4bit and resolved_device == "cuda"),
         )
-        result = run_driftguard_session_nnsight(
-            nns_model=nns_model,
-            tokenizer=tokenizer,
-            prompt=prompt,
-            cfg=cfg,
-            device=resolved_device,
-            safe_reference=safe_reference,
-        )
-    else:
-        result = run_driftguard_session(
-            model=mdl,
-            tokenizer=tokenizer,
-            prompt=prompt,
-            cfg=cfg,
-            device=resolved_device,
-            safe_reference=safe_reference,
-        )
+    result = run_driftguard_session(
+        model=active_model,
+        tokenizer=tokenizer,
+        prompt=prompt,
+        cfg=cfg,
+        device=resolved_device,
+        safe_reference=safe_reference,
+    )
     payload = {
         "model": model.value,
         "device": resolved_device,
@@ -576,6 +571,65 @@ def run_driftguard_session_cmd(
         output_json.parent.mkdir(parents=True, exist_ok=True)
         output_json.write_text(text)
         typer.echo(f"Wrote report to {output_json}")
+
+
+@app.command()
+def calibrate(
+    model: Annotated[
+        ModelKey, typer.Option(help="Model key from registry.")
+    ] = ModelKey.gemma3_4b,
+    dataset: Annotated[
+        DatasetKey, typer.Option(help="Dataset key from registry.")
+    ] = DatasetKey.toy_contrastive,
+    max_samples: Annotated[
+        int, typer.Option(help="Maximum labeled samples for calibration run.")
+    ] = 24,
+    output: Annotated[
+        Path, typer.Option(help="Where to write calibration JSON.")
+    ] = Path("calibration_results.json"),
+    layer_idx: Annotated[
+        int, typer.Option(help="Layer index used by online runtime.")
+    ] = -1,
+    max_new_tokens: Annotated[
+        int, typer.Option(help="Generated tokens per prompt during calibration.")
+    ] = 24,
+    device: Annotated[
+        Optional[str], typer.Option(help="Device override (cuda/mps/cpu).")
+    ] = None,
+    random_seed: Annotated[
+        int, typer.Option(help="Reproducible random seed.")
+    ] = 42,
+) -> None:
+    """Calibrate risk threshold/weights against labeled prompts."""
+    from latent_dynamics.calibration import calibrate_risk_score
+    from latent_dynamics.config import DriftGuardConfig
+    from latent_dynamics.data import load_examples, prepare_text_and_labels
+    from latent_dynamics.models import load_model_and_tokenizer, resolve_device
+
+    ds, spec = load_examples(dataset.value, max_samples=max_samples, stratify_labels=True, seed=random_seed)
+    texts, labels = prepare_text_and_labels(ds, spec)
+    if labels is None:
+        raise typer.BadParameter("Selected dataset does not provide labels for calibration.")
+    resolved_device = resolve_device(device)
+    mdl, tokenizer = load_model_and_tokenizer(model.value, resolved_device, load_in_4bit=False)
+    cfg = DriftGuardConfig(
+        model_key=model.value,
+        dataset_key=dataset.value,
+        layer_idx=layer_idx,
+        max_new_tokens=max_new_tokens,
+        random_seed=random_seed,
+        use_nnsight=False,
+    )
+    result = calibrate_risk_score(
+        cfg=cfg,
+        model=mdl,
+        tokenizer=tokenizer,
+        prompts=texts,
+        labels=labels.tolist(),
+        device=resolved_device,
+        output_path=output,
+    )
+    typer.echo(json.dumps(result, indent=2))
 
 
 @app.command()
