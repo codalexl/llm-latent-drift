@@ -3,8 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import warnings
 from collections.abc import Mapping
+from pathlib import Path
+from typing import Protocol
 
 import numpy as np
+from sklearn.decomposition import PCA
 
 from latent_dynamics.config import DriftGuardConfig
 
@@ -64,25 +67,135 @@ def pca_reduce(points: np.ndarray, n_components: int = 8) -> np.ndarray:
     return u[:, :k] * s[:k]
 
 
+class ManifoldReducer(Protocol):
+    def transform(self, points: np.ndarray) -> np.ndarray: ...
+
+
+class PreFitUMAP:
+    """Inference-only UMAP reducer fit once on calibration trajectories."""
+
+    def __init__(self, safe_trajectories: np.ndarray, cfg: DriftGuardConfig, n_components: int) -> None:
+        try:
+            import umap  # type: ignore[import]
+        except Exception as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError("UMAP is unavailable.") from exc
+        n_points = max(int(safe_trajectories.shape[0]), 2)
+        n_neighbors = min(15, max(2, int(cfg.topology_window) // 2), n_points - 1)
+        self.reducer = umap.UMAP(
+            n_components=max(1, min(int(n_components), safe_trajectories.shape[1])),
+            n_neighbors=n_neighbors,
+            min_dist=min(0.5, max(0.01, 0.1 * (8.0 / max(float(cfg.topology_window), 1.0)))),
+            random_state=int(cfg.random_seed or 0),
+            n_jobs=1,
+        )
+        self.reducer.fit(np.asarray(safe_trajectories, dtype=np.float32))
+
+    def transform(self, points: np.ndarray) -> np.ndarray:
+        return np.asarray(self.reducer.transform(points), dtype=np.float32)
+
+
+class FastPCA:
+    """Stateful PCA for inference-time transforms."""
+
+    def __init__(self, n_components: int) -> None:
+        self.n_components = int(n_components)
+        self._pca: PCA | None = None
+
+    def fit(self, points: np.ndarray) -> None:
+        if points.shape[0] == 0:
+            self._pca = None
+            return
+        k = max(1, min(int(self.n_components), points.shape[0], points.shape[1]))
+        self._pca = PCA(n_components=k, svd_solver="full")
+        try:
+            self._pca.fit(points)
+        except Exception:
+            self._pca = None
+
+    def transform(self, points: np.ndarray) -> np.ndarray:
+        if points.shape[0] == 0:
+            return points
+        if self._pca is None:
+            self.fit(points)
+        if self._pca is None:
+            return pca_reduce(points, n_components=self.n_components)
+        return np.asarray(self._pca.transform(points), dtype=np.float32)
+
+
+_REDUCER_CACHE: dict[str, ManifoldReducer] = {}
+
+
+def _safe_trajectory_candidates(cfg: DriftGuardConfig) -> list[Path]:
+    extra = getattr(cfg, "safe_trajectories_path", None)
+    out: list[Path] = []
+    if isinstance(extra, str) and extra.strip():
+        out.append(Path(extra))
+    out.extend(
+        [
+            Path("calibration_safe_trajectories.npy"),
+            Path("artifacts/calibration_safe_trajectories.npy"),
+        ]
+    )
+    return out
+
+
+def _load_safe_trajectories(cfg: DriftGuardConfig) -> np.ndarray | None:
+    for candidate in _safe_trajectory_candidates(cfg):
+        if candidate.exists():
+            arr = np.load(candidate)
+            if arr.ndim == 2 and arr.shape[0] > 1:
+                return np.asarray(arr, dtype=np.float32)
+    return None
+
+
+def _reducer_key(cfg: DriftGuardConfig, n_components: int, input_dim: int) -> str:
+    return f"{cfg.reduction_method}:{n_components}:{input_dim}:{cfg.topology_window}:{cfg.random_seed}"
+
+
 def _reduce_points(points: np.ndarray, cfg: DriftGuardConfig, n_components: int) -> np.ndarray:
+    if points.shape[0] == 0:
+        return points
     method = str(cfg.reduction_method).lower()
     if method == "none":
         return points
+    cache_key = _reducer_key(cfg, n_components, points.shape[1])
     if method == "umap":
-        try:
-            import umap  # type: ignore[import]
-        except Exception:
-            warnings.warn(
-                "UMAP reduction requested but unavailable; falling back to PCA.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        reducer = _REDUCER_CACHE.get(cache_key)
+        if reducer is None:
+            safe = _load_safe_trajectories(cfg)
+            if safe is None:
+                warnings.warn(
+                    "UMAP requested without pre-fit safe trajectories; falling back to PCA.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return pca_reduce(points, n_components=n_components)
+            try:
+                reducer = PreFitUMAP(safe_trajectories=safe, cfg=cfg, n_components=n_components)
+            except Exception:
+                warnings.warn(
+                    "UMAP pre-fit failed; falling back to PCA.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return pca_reduce(points, n_components=n_components)
+            _REDUCER_CACHE[cache_key] = reducer
+        return reducer.transform(np.asarray(points, dtype=np.float32))
+    if method == "pca":
+        if points.shape[0] < 2:
             return pca_reduce(points, n_components=n_components)
-        reducer = umap.UMAP(
-            n_components=max(1, min(int(n_components), points.shape[1])),
-            random_state=int(cfg.random_seed or 0),
+        reducer = _REDUCER_CACHE.get(cache_key)
+        if reducer is None:
+            reducer = FastPCA(n_components=n_components)
+            _REDUCER_CACHE[cache_key] = reducer
+        return reducer.transform(np.asarray(points, dtype=np.float32))
+    if method != "pca":
+        warnings.warn(
+            f"Unknown reduction method '{method}'; falling back to PCA.",
+            RuntimeWarning,
+            stacklevel=2,
         )
-        return np.asarray(reducer.fit_transform(points), dtype=np.float32)
+        return pca_reduce(points, n_components=n_components)
     return pca_reduce(points, n_components=n_components)
 
 

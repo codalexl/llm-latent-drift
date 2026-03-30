@@ -105,6 +105,7 @@ def steer_with_nnsight(
     alpha: float = 0.1,
     contrastive_direction: torch.Tensor | None = None,
     project: bool = True,
+    clear_cache_after_steer: bool = False,
 ) -> dict[str, object]:
     """
     Apply a causal activation intervention with nnsight.
@@ -136,16 +137,17 @@ def steer_with_nnsight(
         raise AttributeError("Could not locate nnsight layer stack on wrapped model.")
 
     layers = _layer_stack(nns_model)
-    with nns_model.trace(prompt):
+    with nns_model.trace(prompt) as tracer:
         layer_out = layers[layer_idx].output[0]
+        base_hidden = layer_out[:, -1, :]
         if contrastive_direction is not None:
             direction = contrastive_direction.to(layer_out.device)
-            current_hidden = layer_out[:, -1, :]
             if project:
-                h_norm_sq = torch.sum(current_hidden * current_hidden, dim=-1, keepdim=True).clamp(min=1e-8)
+                # Project against the pre-intervention residual-stream state.
+                h_norm_sq = torch.sum(base_hidden * base_hidden, dim=-1, keepdim=True).clamp(min=1e-8)
                 parallel = (
-                    torch.sum(direction * current_hidden, dim=-1, keepdim=True) / h_norm_sq
-                ) * current_hidden
+                    torch.sum(direction * base_hidden, dim=-1, keepdim=True) / h_norm_sq
+                ) * base_hidden
                 direction = direction - parallel
             unit = direction / torch.clamp(torch.norm(direction, p=2, dim=-1, keepdim=True), min=1e-8)
             delta = alpha * unit
@@ -153,9 +155,11 @@ def steer_with_nnsight(
         else:
             if safe_ref_hidden is None:
                 raise ValueError("safe_ref_hidden must be provided for reference steering.")
-            delta = alpha * (safe_ref_hidden.to(layer_out.device) - layer_out[:, -1, :])
+            delta = alpha * (safe_ref_hidden.to(layer_out.device) - base_hidden)
             mode = "safe_reference"
-        layer_out[:, -1, :] = layer_out[:, -1, :] + delta
+        layer_out[:, -1, :] = base_hidden + delta
+        if clear_cache_after_steer and hasattr(tracer, "model") and hasattr(tracer.model, "past_key_values"):
+            tracer.model.past_key_values = None
         logits_proxy = nns_model.lm_head.output.save()
 
     logits = logits_proxy.value if hasattr(logits_proxy, "value") else logits_proxy

@@ -97,15 +97,21 @@ class _GpuHiddenRingBuffer:
     count: int = 0
 
     @classmethod
-    def create(cls, window: int, hidden_dim: int, device: torch.device) -> "_GpuHiddenRingBuffer":
+    def create(
+        cls,
+        window: int,
+        hidden_dim: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> "_GpuHiddenRingBuffer":
         return cls(
-            data=torch.zeros((window, hidden_dim), device=device, dtype=torch.float32),
+            data=torch.zeros((window, hidden_dim), device=device, dtype=dtype),
             write_idx=0,
             count=0,
         )
 
     def append(self, hidden: torch.Tensor) -> None:
-        self.data[self.write_idx] = hidden.float()
+        self.data[self.write_idx] = hidden.to(dtype=self.data.dtype)
         self.write_idx = (self.write_idx + 1) % self.data.shape[0]
         self.count = min(self.count + 1, self.data.shape[0])
 
@@ -119,7 +125,7 @@ class _GpuHiddenRingBuffer:
                 [self.data[self.write_idx :], self.data[: self.write_idx]],
                 dim=0,
             )
-        return ordered.detach().to("cpu").numpy()
+        return ordered.detach().to(dtype=torch.float32).to("cpu").numpy()
 
 
 class ModelAdapter:
@@ -504,6 +510,7 @@ def _steer_logits_nnsight(
             ),
             contrastive_direction=contrastive_vector,
             project=True,
+            clear_cache_after_steer=cfg.clear_cache_after_steer,
         )
         logits_for_sample = torch.as_tensor(steer_out["logits"]).to(logits_last.device)
         delta_norm = float(torch.norm(logits_for_sample - logits_last, p=2).item())
@@ -696,6 +703,7 @@ def run_driftguard_session(
                 window=cfg.topology_window,
                 hidden_dim=int(hidden.shape[-1]),
                 device=hidden.device,
+                dtype=hidden.dtype,
             )
         hidden_history.append(hidden.squeeze(0))
 
@@ -847,7 +855,7 @@ def run_driftguard_session_nnsight(
     for step_idx in range(cfg.max_new_tokens):
         t0 = perf_counter()
         layers = adapter.layer_stack()
-        with nns_model.trace(running_text):
+        with nns_model.trace(running_text, scan=True):
             hidden_proxy = layers[cfg.layer_idx].output[0].save()
             logits_proxy = nns_model.lm_head.output.save()
         hidden_val = _materialize_proxy(hidden_proxy)
@@ -878,6 +886,7 @@ def run_driftguard_session_nnsight(
                 window=cfg.topology_window,
                 hidden_dim=int(hidden.shape[-1]),
                 device=hidden.device,
+                dtype=hidden.dtype,
             )
         hidden_history.append(hidden.squeeze(0))
 

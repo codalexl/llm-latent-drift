@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
 from sklearn.metrics import (
     average_precision_score,
     precision_recall_curve,
@@ -175,6 +176,36 @@ def calibrate_risk_score(
         raise ValueError("prompts and labels must have equal length.")
     if not prompts:
         raise ValueError("calibration requires at least one prompt.")
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    # Persist safe trajectories for inference-only manifold reducers (e.g., UMAP).
+    safe_prompts_for_reducer = [p for p, y_i in zip(prompts, labels) if int(y_i) == 0]
+    if safe_prompts_for_reducer:
+        safe_states: list[np.ndarray] = []
+        for prompt in safe_prompts_for_reducer:
+            encoded = tokenizer(prompt, return_tensors="pt")
+            input_ids = encoded["input_ids"].to(device)
+            attention_mask = encoded["attention_mask"].to(device)
+            with torch.no_grad():
+                out_hidden = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                    use_cache=False,
+                    return_dict=True,
+                )
+            h = out_hidden.hidden_states[cfg.layer_idx]
+            if hasattr(h, "detach"):
+                arr = h.detach().squeeze(0).to("cpu").numpy()
+            else:
+                arr = np.asarray(h).squeeze(0)
+            if arr.ndim == 2 and arr.shape[0] > 0:
+                safe_states.append(np.asarray(arr, dtype=np.float32))
+        if safe_states:
+            safe_matrix = np.concatenate(safe_states, axis=0).astype(np.float32)
+            safe_path = out.parent / "calibration_safe_trajectories.npy"
+            np.save(safe_path, safe_matrix)
 
     prompt_components: list[tuple[float, float, np.ndarray]] = []
     for prompt in prompts:
@@ -399,9 +430,11 @@ def calibrate_risk_score(
             result["contrastive_vectors"] = {}
     else:
         result["contrastive_vectors"] = {}
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, indent=2))
+    if safe_prompts_for_reducer:
+        safe_path = out.parent / "calibration_safe_trajectories.npy"
+        if safe_path.exists():
+            result["safe_trajectories_path"] = str(safe_path)
     return result
 
 

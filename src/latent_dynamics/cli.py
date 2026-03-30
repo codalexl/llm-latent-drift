@@ -331,6 +331,10 @@ def run_driftguard_session_cmd(
         int,
         typer.Option(help="PCA components used before topology metrics."),
     ] = 3,
+    manifold: Annotated[
+        str,
+        typer.Option(help="Manifold reducer for topology path: pca|umap|none."),
+    ] = "pca",
     topology_diameter_ceiling: Annotated[
         float, typer.Option(help="Ceiling for topology diameter risk term.")
     ] = 1.5,
@@ -462,6 +466,7 @@ def run_driftguard_session_cmd(
         tda_latency_budget_ms=tda_latency_budget_ms,
         tda_enabled=tda_enabled,
         pca_components=pca_components,
+        reduction_method=manifold,
         topology_diameter_ceiling=topology_diameter_ceiling,
         topology_beta1_ceiling=topology_beta1_ceiling,
         continuity_weight=continuity_weight,
