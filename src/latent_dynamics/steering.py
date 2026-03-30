@@ -105,7 +105,6 @@ def steer_with_nnsight(
     alpha: float = 0.1,
     contrastive_direction: torch.Tensor | None = None,
     project: bool = True,
-    clear_cache_after_steer: bool = False,
 ) -> dict[str, object]:
     """
     Apply a causal activation intervention with nnsight.
@@ -137,7 +136,7 @@ def steer_with_nnsight(
         raise AttributeError("Could not locate nnsight layer stack on wrapped model.")
 
     layers = _layer_stack(nns_model)
-    with nns_model.trace(prompt) as tracer:
+    with nns_model.trace(prompt):
         layer_out = layers[layer_idx].output[0]
         base_hidden = layer_out[:, -1, :]
         if contrastive_direction is not None:
@@ -158,8 +157,6 @@ def steer_with_nnsight(
             delta = alpha * (safe_ref_hidden.to(layer_out.device) - base_hidden)
             mode = "safe_reference"
         layer_out[:, -1, :] = base_hidden + delta
-        if clear_cache_after_steer and hasattr(tracer, "model") and hasattr(tracer.model, "past_key_values"):
-            tracer.model.past_key_values = None
         logits_proxy = nns_model.lm_head.output.save()
 
     logits = logits_proxy.value if hasattr(logits_proxy, "value") else logits_proxy

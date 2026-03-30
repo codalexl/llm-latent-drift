@@ -510,7 +510,6 @@ def _steer_logits_nnsight(
             ),
             contrastive_direction=contrastive_vector,
             project=True,
-            clear_cache_after_steer=cfg.clear_cache_after_steer,
         )
         logits_for_sample = torch.as_tensor(steer_out["logits"]).to(logits_last.device)
         delta_norm = float(torch.norm(logits_for_sample - logits_last, p=2).item())
@@ -830,14 +829,19 @@ def run_driftguard_session_nnsight(
     safe_reference: torch.Tensor | None = None,
     contrastive_vectors: dict[str, list[float]] | None = None,
 ) -> DriftSessionResult:
-    """nnsight-backed online drift loop.
+    """nnsight-backed online drift loop with cache-aware token stepping.
 
-    By default this path traces the full running prefix each step, which favors
-    tracing fidelity over speed.
+    Fast path uses incremental token forwarding with `past_key_values` to avoid
+    quadratic running-prefix retracing. If a backend does not support direct
+    forward calls, this function gracefully falls back to `trace(...)`.
     """
     _set_random_seed(cfg.random_seed)
-
-    running_text = prompt
+    encoded = tokenizer(prompt, return_tensors="pt")
+    full_input_ids = encoded["input_ids"].to(device)
+    full_attention_mask = encoded["attention_mask"].to(device)
+    input_ids = full_input_ids
+    attention_mask = full_attention_mask
+    past_key_values = None
     prev_hidden: torch.Tensor | None = None
     hidden_history: _GpuHiddenRingBuffer | None = None
     last_topology = None
@@ -850,37 +854,52 @@ def run_driftguard_session_nnsight(
         layer_idx=cfg.layer_idx,
         contrastive_vectors=contrastive_vectors,
     )
-
     adapter = ModelAdapter(nns_model)
     for step_idx in range(cfg.max_new_tokens):
         t0 = perf_counter()
-        layers = adapter.layer_stack()
-        with nns_model.trace(running_text, scan=True):
-            hidden_proxy = layers[cfg.layer_idx].output[0].save()
-            logits_proxy = nns_model.lm_head.output.save()
-        hidden_val = _materialize_proxy(hidden_proxy)
-        logits_val = _materialize_proxy(logits_proxy)
-        if isinstance(hidden_val, torch.Tensor):
-            hidden_t = hidden_val.detach()
-        else:
-            hidden_t = torch.as_tensor(hidden_val)
-        if hidden_t.ndim == 3:
-            hidden = hidden_t[:, -1, :]
-        elif hidden_t.ndim == 2:
-            hidden = hidden_t[-1:, :]
-        else:
-            raise ValueError(f"Unexpected hidden tensor rank for nnsight: {hidden_t.ndim}")
+        try:
+            with torch.no_grad():
+                out = nns_model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                    use_cache=True,
+                    past_key_values=past_key_values,
+                    return_dict=True,
+                )
+            past_key_values = out.past_key_values
+            hidden = out.hidden_states[cfg.layer_idx][:, -1, :].detach()
+            logits_last = out.logits[:, -1, :].detach()
+        except Exception:
+            layers = adapter.layer_stack()
+            prompt_for_trace = tokenizer.decode(full_input_ids[0], skip_special_tokens=False)
+            with nns_model.trace(prompt_for_trace, scan=True):
+                hidden_proxy = layers[cfg.layer_idx].output[0].save()
+                logits_proxy = nns_model.lm_head.output.save()
+            hidden_val = _materialize_proxy(hidden_proxy)
+            logits_val = _materialize_proxy(logits_proxy)
+            if isinstance(hidden_val, torch.Tensor):
+                hidden_t = hidden_val.detach()
+            else:
+                hidden_t = torch.as_tensor(hidden_val)
+            if hidden_t.ndim == 3:
+                hidden = hidden_t[:, -1, :]
+            elif hidden_t.ndim == 2:
+                hidden = hidden_t[-1:, :]
+            else:
+                raise ValueError(f"Unexpected hidden tensor rank for nnsight: {hidden_t.ndim}")
+            if isinstance(logits_val, torch.Tensor):
+                logits_t = logits_val.detach()
+            else:
+                logits_t = torch.as_tensor(logits_val)
+            if logits_t.ndim == 3:
+                logits_last = logits_t[:, -1, :]
+            elif logits_t.ndim == 2:
+                logits_last = logits_t[-1:, :]
+            else:
+                raise ValueError(f"Unexpected logits tensor rank for nnsight: {logits_t.ndim}")
+            past_key_values = None
 
-        if isinstance(logits_val, torch.Tensor):
-            logits_t = logits_val.detach()
-        else:
-            logits_t = torch.as_tensor(logits_val)
-        if logits_t.ndim == 3:
-            logits_last = logits_t[:, -1, :]
-        elif logits_t.ndim == 2:
-            logits_last = logits_t[-1:, :]
-        else:
-            raise ValueError(f"Unexpected logits tensor rank for nnsight: {logits_t.ndim}")
         if hidden_history is None:
             hidden_history = _GpuHiddenRingBuffer.create(
                 window=cfg.topology_window,
@@ -905,17 +924,29 @@ def run_driftguard_session_nnsight(
         steering_delta_norm = None
         logits_for_sample = logits_last
         if m.alarm and (contrastive_vector is not None or safe_reference is not None):
-            steering_out = _apply_steering_intervention(
-                backend="nnsight",
-                cfg=cfg,
-                device=device,
-                logits_last=logits_last,
-                hidden=hidden,
-                safe_reference=safe_reference,
-                contrastive_vector=contrastive_vector,
-                nns_model=nns_model,
-                prompt=running_text,
-            )
+            # Prefer in-pass hidden-space steering to avoid an extra nnsight trace.
+            if hasattr(nns_model, "get_output_embeddings"):
+                steering_out = _steer_logits_hf(
+                    model=nns_model,
+                    hidden=hidden,
+                    logits_last=logits_last,
+                    safe_reference=safe_reference,
+                    contrastive_vector=contrastive_vector,
+                    cfg=cfg,
+                )
+            else:
+                prompt_for_steer = tokenizer.decode(full_input_ids[0], skip_special_tokens=False)
+                steering_out = _apply_steering_intervention(
+                    backend="nnsight",
+                    cfg=cfg,
+                    device=device,
+                    logits_last=logits_last,
+                    hidden=hidden,
+                    safe_reference=safe_reference,
+                    contrastive_vector=contrastive_vector,
+                    nns_model=nns_model,
+                    prompt=prompt_for_steer,
+                )
             logits_for_sample = steering_out.logits
             steered = steering_out.steered
             steering_delta_norm = steering_out.delta_norm
@@ -936,12 +967,18 @@ def run_driftguard_session_nnsight(
             latency_ms=latency_ms,
         ))
         prev_hidden = hidden
-
         if token_id == tokenizer.eos_token_id:
             break
-        running_text = running_text + tokenizer.decode([token_id], skip_special_tokens=False)
-
-    result = _summarize_session(generated, steps, tokenizer, tda_state)
-    if cfg.clear_cache_after_steer and any(step.steered for step in steps):
-        _maybe_clear_device_cache(device)
-    return result
+        new_token = torch.tensor([[token_id]], dtype=torch.long, device=device)
+        full_input_ids = torch.cat([full_input_ids, new_token], dim=1)
+        full_attention_mask = torch.cat(
+            [full_attention_mask, torch.ones_like(new_token, device=device)],
+            dim=1,
+        )
+        if past_key_values is None:
+            input_ids = full_input_ids
+            attention_mask = full_attention_mask
+        else:
+            input_ids = new_token
+            attention_mask = torch.ones_like(new_token, device=device)
+    return _summarize_session(generated, steps, tokenizer, tda_state)
