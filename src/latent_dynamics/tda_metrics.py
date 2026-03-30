@@ -177,6 +177,14 @@ def topology_snapshot(
     pca_components: int | None = None,
     tda_enabled: bool | None = None,
 ) -> TopologySnapshot:
+    """Compute a compact TDA proxy over small trajectory windows.
+
+    Notes:
+    - Online windows are intentionally small; resulting Betti/persistence signals
+      are heuristic and used only as an auxiliary risk term.
+    - Linear PCA can distort non-linear manifold structure, so this metric should
+      not be interpreted as a full topological characterization.
+    """
     cfg = config or DriftGuardConfig()
     n_components = cfg.pca_components if pca_components is None else int(pca_components)
     do_tda = cfg.tda_enabled if tda_enabled is None else bool(tda_enabled)
@@ -248,19 +256,27 @@ def decompose_risk_components(
 
     topo_diam_risk = 0.0
     if cloud_diam is not None:
-        topo_diam_risk = 0.40 * (max(float(cloud_diam), 0.0) / max(cfg.topology_diameter_scale, 1e-6))
+        topo_diam_risk = cfg.topology_diameter_weight * (
+            max(float(cloud_diam), 0.0) / max(cfg.topology_diameter_scale, 1e-6)
+        )
 
     topo_p1_risk = 0.0
     if persistence_l1 is not None:
-        topo_p1_risk = 0.30 * (max(float(persistence_l1), 0.0) / max(cfg.persistence_l1_scale, 1e-6))
+        topo_p1_risk = cfg.topology_persistence_l1_weight * (
+            max(float(persistence_l1), 0.0) / max(cfg.persistence_l1_scale, 1e-6)
+        )
 
     topo_b0_risk = 0.0
     if beta0 is not None:
-        topo_b0_risk = 0.15 * (max(float(beta0), 0.0) / max(cfg.beta0_scale, 1e-6))
+        topo_b0_risk = cfg.topology_beta0_weight * (
+            max(float(beta0), 0.0) / max(cfg.beta0_scale, 1e-6)
+        )
 
     topo_b1_risk = 0.0
     if beta1 is not None:
-        topo_b1_risk = 0.15 * (max(float(beta1), 0.0) / max(cfg.beta1_scale, 1e-6))
+        topo_b1_risk = cfg.topology_beta1_weight * (
+            max(float(beta1), 0.0) / max(cfg.beta1_scale, 1e-6)
+        )
 
     topology_risk = min(topo_diam_risk + topo_p1_risk + topo_b0_risk + topo_b1_risk, 2.0)
     return RiskComponents(

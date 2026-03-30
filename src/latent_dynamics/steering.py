@@ -53,8 +53,17 @@ def apply_contrastive_steering(
     contrastive_direction: torch.Tensor,
     strength: float = 0.25,
     max_delta_norm: float = 8.0,
+    project: bool = True,
 ) -> tuple[torch.Tensor, SteeringResult]:
-    """Shift hidden state along a contrastive direction."""
+    """Shift hidden state along a contrastive direction.
+
+    Args:
+        project: If True, remove the component of the contrastive direction
+            that is parallel to the current hidden state before steering.
+            This constrains the perturbation to directions orthogonal to the
+            current representation, reducing the chance of pushing the state
+            off the model's learned manifold.
+    """
     if hidden.ndim != 2 or hidden.shape[0] != 1:
         raise ValueError("hidden must have shape (1, hidden_dim).")
     if contrastive_direction.ndim == 1:
@@ -66,8 +75,16 @@ def apply_contrastive_steering(
     if alpha <= 0.0:
         return hidden, SteeringResult(applied=False, delta_norm=0.0)
 
-    unit = contrastive_direction / torch.clamp(
-        torch.norm(contrastive_direction, p=2, dim=-1, keepdim=True),
+    direction = contrastive_direction
+    if project:
+        # Project out the component parallel to the current hidden state so the
+        # steering perturbation is orthogonal, staying closer to the manifold.
+        h_norm_sq = torch.sum(hidden * hidden, dim=-1, keepdim=True).clamp(min=1e-8)
+        parallel = (torch.sum(direction * hidden, dim=-1, keepdim=True) / h_norm_sq) * hidden
+        direction = direction - parallel
+
+    unit = direction / torch.clamp(
+        torch.norm(direction, p=2, dim=-1, keepdim=True),
         min=1e-8,
     )
     delta = alpha * unit

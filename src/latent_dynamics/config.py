@@ -59,6 +59,11 @@ class DriftGuardConfig(BaseModel):
     beta1_scale: float = Field(default=3.0, gt=0.0)
     topology_diameter_ceiling: float = Field(default=1.50, gt=0.0)
     topology_beta1_ceiling: float = Field(default=1.00, gt=0.0)
+    # Topology sub-weights (must sum to 1.0).
+    topology_diameter_weight: float = Field(default=0.40, ge=0.0, le=1.0)
+    topology_persistence_l1_weight: float = Field(default=0.30, ge=0.0, le=1.0)
+    topology_beta0_weight: float = Field(default=0.15, ge=0.0, le=1.0)
+    topology_beta1_weight: float = Field(default=0.15, ge=0.0, le=1.0)
     probe_weight: float = Field(default=0.60, ge=0.0, le=1.0)
     contrastive_steering_strength: float = Field(default=0.25, ge=0.0, le=1.0)
     use_contrastive_probe: bool = True
@@ -68,7 +73,7 @@ class DriftGuardConfig(BaseModel):
     use_nnsight: bool = False
     nnsight_full_prefix_trace: bool = True
     nnsight_fail_open: bool = True
-    clear_cache_after_steer: bool = True
+    clear_cache_after_steer: bool = False
     random_seed: int | None = None
 
     @model_validator(mode="after")
@@ -77,6 +82,16 @@ class DriftGuardConfig(BaseModel):
         if abs(total - 1.0) > 1e-6:
             raise ValueError(
                 "continuity_weight + lipschitz_weight + topology_weight must equal 1.0"
+            )
+        topo_total = (
+            self.topology_diameter_weight
+            + self.topology_persistence_l1_weight
+            + self.topology_beta0_weight
+            + self.topology_beta1_weight
+        )
+        if abs(topo_total - 1.0) > 1e-6:
+            raise ValueError(
+                "topology sub-weights (diameter, persistence_l1, beta0, beta1) must equal 1.0"
             )
         return self
 

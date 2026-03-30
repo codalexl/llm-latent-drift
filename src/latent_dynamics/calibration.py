@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -11,11 +12,14 @@ from sklearn.metrics import (
     roc_auc_score,
     roc_curve,
 )
+from sklearn.model_selection import StratifiedKFold
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from latent_dynamics.contrastive_vectors import compute_contrastive_vector
 from latent_dynamics.config import DriftGuardConfig
 from latent_dynamics.online_runtime import run_driftguard_session
+
+logger = logging.getLogger(__name__)
 
 
 def _is_better_candidate(
@@ -126,14 +130,15 @@ def _decompose_risk_raw(step: Any, cfg: DriftGuardConfig) -> tuple[float, float,
 def _apply_scales(
     raw: np.ndarray,
     scales: tuple[float, float, float, float],
+    topo_weights: tuple[float, float, float, float] = (0.40, 0.30, 0.15, 0.15),
 ) -> np.ndarray:
     diam_s, p1_s, b0_s, b1_s = scales
-    # Keep the same topology decomposition weights, but learn the scales from labels.
+    diam_w, p1_w, b0_w, b1_w = topo_weights
     topo = (
-        0.40 * (raw[:, 0] / max(diam_s, 1e-6))
-        + 0.30 * (raw[:, 1] / max(p1_s, 1e-6))
-        + 0.15 * (raw[:, 2] / max(b0_s, 1e-6))
-        + 0.15 * (raw[:, 3] / max(b1_s, 1e-6))
+        diam_w * (raw[:, 0] / max(diam_s, 1e-6))
+        + p1_w * (raw[:, 1] / max(p1_s, 1e-6))
+        + b0_w * (raw[:, 2] / max(b0_s, 1e-6))
+        + b1_w * (raw[:, 3] / max(b1_s, 1e-6))
     )
     return np.clip(topo, 0.0, 2.0)
 
@@ -216,7 +221,13 @@ def calibrate_risk_score(
         float(cfg.beta0_scale),
         float(cfg.beta1_scale),
     )
-    default_topology = _apply_scales(t_raw, best_scales[2:])
+    topo_sub_weights = (
+        cfg.topology_diameter_weight,
+        cfg.topology_persistence_l1_weight,
+        cfg.topology_beta0_weight,
+        cfg.topology_beta1_weight,
+    )
+    default_topology = _apply_scales(t_raw, best_scales[2:], topo_weights=topo_sub_weights)
     best_scores = np.clip(
         _compose_scaled_score(
             c_raw,
@@ -228,6 +239,8 @@ def calibrate_risk_score(
         0.0,
         1.5,
     )
+    cv_auc_mean: float | None = None
+    overfit_gap: float | None = None
     if len(np.unique(y)) >= 2:
         # Initialize from defaults so tie-cases don't collapse to first grid point.
         best_auc = float(roc_auc_score(y, best_scores))
@@ -241,13 +254,19 @@ def calibrate_risk_score(
         b0_grid = _quantile_scales(t_raw[:, 2])
         b1_grid = _quantile_scales(t_raw[:, 3])
 
+        # k-fold CV: evaluate candidates on held-out folds to avoid overfitting.
+        n_folds = min(5, min(int(np.sum(y == 0)), int(np.sum(y == 1))))
+        n_folds = max(n_folds, 2)
+        skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=cfg.random_state)
+        folds = list(skf.split(c_raw, y))
+
         for c_s in c_grid:
             for l_s in l_grid:
                 for diam_s in diam_grid:
                     for p1_s in p1_grid:
                         for b0_s in b0_grid:
                             for b1_s in b1_grid:
-                                topo = _apply_scales(t_raw, (diam_s, p1_s, b0_s, b1_s))
+                                topo = _apply_scales(t_raw, (diam_s, p1_s, b0_s, b1_s), topo_weights=topo_sub_weights)
                                 for c_w, l_w, t_w in _weight_candidates(step=0.1):
                                     candidate = np.clip(
                                         _compose_scaled_score(
@@ -260,7 +279,16 @@ def calibrate_risk_score(
                                         0.0,
                                         1.5,
                                     )
-                                    auc = float(roc_auc_score(y, candidate))
+                                    # Use mean CV AUC as primary selection metric.
+                                    fold_aucs = []
+                                    for train_idx, val_idx in folds:
+                                        y_val = y[val_idx]
+                                        if len(np.unique(y_val)) < 2:
+                                            continue
+                                        fold_aucs.append(float(roc_auc_score(y_val, candidate[val_idx])))
+                                    if not fold_aucs:
+                                        continue
+                                    auc = float(np.mean(fold_aucs))
                                     pr_auc = float(average_precision_score(y, candidate))
                                     cand_std = float(np.std(candidate))
                                     if _is_better_candidate(
@@ -278,11 +306,26 @@ def calibrate_risk_score(
                                         best_scales = (c_s, l_s, diam_s, p1_s, b0_s, b1_s)
                                         best_scores = candidate
 
+        # Compute overfitting gap: train AUC vs mean CV (validation) AUC.
+        train_auc = float(roc_auc_score(y, best_scores))
+        cv_fold_aucs = []
+        for train_idx, val_idx in folds:
+            y_val = y[val_idx]
+            if len(np.unique(y_val)) < 2:
+                continue
+            cv_fold_aucs.append(float(roc_auc_score(y_val, best_scores[val_idx])))
+        cv_auc_mean = float(np.mean(cv_fold_aucs)) if cv_fold_aucs else train_auc
+        overfit_gap = train_auc - cv_auc_mean
+
     result = summarize_calibration_from_scores(
         scores=best_scores,
         labels=labels,
         cfg=cfg,
     )
+    if cv_auc_mean is not None:
+        result["cv_auc_mean"] = float(cv_auc_mean)
+    if overfit_gap is not None:
+        result["overfit_gap"] = float(overfit_gap)
     result["optimal_weights"] = {
         "continuity": best_weights[0],
         "lipschitz": best_weights[1],
@@ -321,7 +364,7 @@ def calibrate_risk_score(
         "beta0_scale": best_scales[4],
         "beta1_scale": best_scales[5],
     }
-    best_topology = _apply_scales(t_raw, best_scales[2:])
+    best_topology = _apply_scales(t_raw, best_scales[2:], topo_weights=topo_sub_weights)
     c_scaled = c_raw / max(best_scales[0], 1e-6)
     l_scaled = l_raw / max(best_scales[1], 1e-6)
     result["risk_component_maxima"] = {
@@ -352,6 +395,7 @@ def calibrate_risk_score(
             result["contrastive_vectors"] = {f"layer_{cfg.layer_idx}": vec.astype(float).tolist()}
         except Exception:
             # Keep calibration usable even if vector extraction fails for a backend.
+            logger.warning("Contrastive vector extraction failed during calibration.", exc_info=True)
             result["contrastive_vectors"] = {}
     else:
         result["contrastive_vectors"] = {}
