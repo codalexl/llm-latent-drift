@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from collections import deque
 from dataclasses import dataclass
 import inspect
 from typing import TYPE_CHECKING, Union
@@ -88,6 +87,39 @@ class _TdaState:
     skipped_budget: int = 0
     skipped_stride: int = 0
     estimated_ms: float | None = None
+
+
+@dataclass
+class _GpuHiddenRingBuffer:
+    """GPU-resident ring buffer for hidden-state history."""
+    data: torch.Tensor
+    write_idx: int = 0
+    count: int = 0
+
+    @classmethod
+    def create(cls, window: int, hidden_dim: int, device: torch.device) -> "_GpuHiddenRingBuffer":
+        return cls(
+            data=torch.zeros((window, hidden_dim), device=device, dtype=torch.float32),
+            write_idx=0,
+            count=0,
+        )
+
+    def append(self, hidden: torch.Tensor) -> None:
+        self.data[self.write_idx] = hidden.float()
+        self.write_idx = (self.write_idx + 1) % self.data.shape[0]
+        self.count = min(self.count + 1, self.data.shape[0])
+
+    def window_numpy(self) -> np.ndarray:
+        if self.count == 0:
+            return np.zeros((0, self.data.shape[1]), dtype=np.float32)
+        if self.count < self.data.shape[0]:
+            ordered = self.data[: self.count]
+        else:
+            ordered = torch.cat(
+                [self.data[self.write_idx :], self.data[: self.write_idx]],
+                dim=0,
+            )
+        return ordered.detach().to("cpu").numpy()
 
 
 class ModelAdapter:
@@ -239,7 +271,7 @@ class _StepMetrics:
 def _compute_step_metrics(
     hidden: torch.Tensor,
     prev_hidden: torch.Tensor | None,
-    hidden_history: deque[np.ndarray],
+    hidden_history: _GpuHiddenRingBuffer,
     last_topology: object | None,
     step_idx: int,
     cfg: DriftGuardConfig,
@@ -257,7 +289,7 @@ def _compute_step_metrics(
         lip = _lipschitz_proxy(hidden, prev_hidden)
 
     # TDA gating
-    has_window = len(hidden_history) >= cfg.topology_window
+    has_window = hidden_history.count >= cfg.topology_window
     within_budget = _tda_within_budget(
         tda_latency_budget_ms=cfg.tda_latency_budget_ms,
         estimated_tda_ms=tda_state.estimated_ms,
@@ -273,7 +305,7 @@ def _compute_step_metrics(
 
     if should_run_tda:
         tda_t0 = perf_counter()
-        window = np.asarray(list(hidden_history), dtype=np.float32)
+        window = hidden_history.window_numpy()
         last_topology = topology_snapshot(
             window,
             config=cfg,
@@ -471,6 +503,7 @@ def _steer_logits_nnsight(
                 else cfg.steering_strength
             ),
             contrastive_direction=contrastive_vector,
+            project=True,
         )
         logits_for_sample = torch.as_tensor(steer_out["logits"]).to(logits_last.device)
         delta_norm = float(torch.norm(logits_for_sample - logits_last, p=2).item())
@@ -612,7 +645,7 @@ def run_driftguard_session(
 
     past_key_values = None
     prev_hidden: torch.Tensor | None = None
-    hidden_history: deque[np.ndarray] = deque(maxlen=cfg.topology_window)
+    hidden_history: _GpuHiddenRingBuffer | None = None
     last_topology = None
     generated: list[int] = []
     steps: list[DriftStep] = []
@@ -658,7 +691,13 @@ def run_driftguard_session(
 
         past_key_values = out.past_key_values
         hidden = out.hidden_states[cfg.layer_idx][:, -1, :].detach()
-        hidden_history.append(hidden.squeeze(0).float().cpu().numpy())
+        if hidden_history is None:
+            hidden_history = _GpuHiddenRingBuffer.create(
+                window=cfg.topology_window,
+                hidden_dim=int(hidden.shape[-1]),
+                device=hidden.device,
+            )
+        hidden_history.append(hidden.squeeze(0))
 
         m, last_topology = _compute_step_metrics(
             hidden=hidden,
@@ -792,7 +831,7 @@ def run_driftguard_session_nnsight(
 
     running_text = prompt
     prev_hidden: torch.Tensor | None = None
-    hidden_history: deque[np.ndarray] = deque(maxlen=cfg.topology_window)
+    hidden_history: _GpuHiddenRingBuffer | None = None
     last_topology = None
     generated: list[int] = []
     steps: list[DriftStep] = []
@@ -834,7 +873,13 @@ def run_driftguard_session_nnsight(
             logits_last = logits_t[-1:, :]
         else:
             raise ValueError(f"Unexpected logits tensor rank for nnsight: {logits_t.ndim}")
-        hidden_history.append(hidden.squeeze(0).float().cpu().numpy())
+        if hidden_history is None:
+            hidden_history = _GpuHiddenRingBuffer.create(
+                window=cfg.topology_window,
+                hidden_dim=int(hidden.shape[-1]),
+                device=hidden.device,
+            )
+        hidden_history.append(hidden.squeeze(0))
 
         m, last_topology = _compute_step_metrics(
             hidden=hidden,

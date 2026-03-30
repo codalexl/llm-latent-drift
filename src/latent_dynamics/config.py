@@ -37,6 +37,7 @@ class DriftGuardConfig(BaseModel):
 
     # Drift runtime / risk config.
     pca_components: int = Field(default=3, ge=1, le=64)
+    reduction_method: str = Field(default="pca", pattern="^(pca|umap|none)$")
     tda_enabled: bool = True
     topology_stride: int = Field(
         default=4,

@@ -104,6 +104,7 @@ def steer_with_nnsight(
     layer_idx: int,
     alpha: float = 0.1,
     contrastive_direction: torch.Tensor | None = None,
+    project: bool = True,
 ) -> dict[str, object]:
     """
     Apply a causal activation intervention with nnsight.
@@ -138,8 +139,15 @@ def steer_with_nnsight(
     with nns_model.trace(prompt):
         layer_out = layers[layer_idx].output[0]
         if contrastive_direction is not None:
-            unit = contrastive_direction.to(layer_out.device)
-            unit = unit / torch.clamp(torch.norm(unit, p=2, dim=-1, keepdim=True), min=1e-8)
+            direction = contrastive_direction.to(layer_out.device)
+            current_hidden = layer_out[:, -1, :]
+            if project:
+                h_norm_sq = torch.sum(current_hidden * current_hidden, dim=-1, keepdim=True).clamp(min=1e-8)
+                parallel = (
+                    torch.sum(direction * current_hidden, dim=-1, keepdim=True) / h_norm_sq
+                ) * current_hidden
+                direction = direction - parallel
+            unit = direction / torch.clamp(torch.norm(direction, p=2, dim=-1, keepdim=True), min=1e-8)
             delta = alpha * unit
             mode = "contrastive_direction"
         else:

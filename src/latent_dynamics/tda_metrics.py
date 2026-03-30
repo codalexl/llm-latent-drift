@@ -64,6 +64,28 @@ def pca_reduce(points: np.ndarray, n_components: int = 8) -> np.ndarray:
     return u[:, :k] * s[:k]
 
 
+def _reduce_points(points: np.ndarray, cfg: DriftGuardConfig, n_components: int) -> np.ndarray:
+    method = str(cfg.reduction_method).lower()
+    if method == "none":
+        return points
+    if method == "umap":
+        try:
+            import umap  # type: ignore[import]
+        except Exception:
+            warnings.warn(
+                "UMAP reduction requested but unavailable; falling back to PCA.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return pca_reduce(points, n_components=n_components)
+        reducer = umap.UMAP(
+            n_components=max(1, min(int(n_components), points.shape[1])),
+            random_state=int(cfg.random_seed or 0),
+        )
+        return np.asarray(reducer.fit_transform(points), dtype=np.float32)
+    return pca_reduce(points, n_components=n_components)
+
+
 def _subsample_points(points: np.ndarray, max_points: int, seed: int = 0) -> tuple[np.ndarray, bool]:
     if points.shape[0] <= max_points:
         return points, False
@@ -182,13 +204,15 @@ def topology_snapshot(
     Notes:
     - Online windows are intentionally small; resulting Betti/persistence signals
       are heuristic and used only as an auxiliary risk term.
-    - Linear PCA can distort non-linear manifold structure, so this metric should
-      not be interpreted as a full topological characterization.
+    - PCA/UMAP projection in this path is a pragmatic variance proxy and should
+      not be interpreted as a strict guarantee of manifold topology.
+    - `cfg.reduction_method` controls pre-TDA reduction (`pca`, `umap`, `none`),
+      with `pca` as the default latency-friendly mode.
     """
     cfg = config or DriftGuardConfig()
     n_components = cfg.pca_components if pca_components is None else int(pca_components)
     do_tda = cfg.tda_enabled if tda_enabled is None else bool(tda_enabled)
-    reduced = _normalize_cloud_median_dist(pca_reduce(points, n_components=n_components))
+    reduced = _normalize_cloud_median_dist(_reduce_points(points, cfg=cfg, n_components=n_components))
     if reduced.shape[0] == 0:
         return TopologySnapshot(
             diameter=0.0,
