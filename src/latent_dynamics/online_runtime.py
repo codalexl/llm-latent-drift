@@ -784,13 +784,10 @@ def run_driftguard_session(
 def load_nnsight_model(
     model_path: str,
     device_map: str = "auto",
-    load_in_4bit: bool = False,
 ) -> object:
     try:
         from nnsight import LanguageModel  # type: ignore[import]
         kwargs: dict[str, object] = {"device_map": device_map}
-        if load_in_4bit:
-            kwargs["dispatch"] = True
         return LanguageModel(model_path, **kwargs)
     except ImportError:
         logger.debug("nnsight.LanguageModel not available; trying NNsight wrapper.")
@@ -806,7 +803,6 @@ def load_nnsight_model(
         return NNsight.from_pretrained(
             model_path,
             device_map=device_map,
-            load_in_4bit=load_in_4bit,
         )
 
     hf_model = AutoModelForCausalLM.from_pretrained(
@@ -870,7 +866,7 @@ def run_driftguard_session_nnsight(
             past_key_values = out.past_key_values
             hidden = out.hidden_states[cfg.layer_idx][:, -1, :].detach()
             logits_last = out.logits[:, -1, :].detach()
-        except Exception:
+        except (TypeError, ValueError, NotImplementedError):
             layers = adapter.layer_stack()
             prompt_for_trace = tokenizer.decode(full_input_ids[0], skip_special_tokens=False)
             with nns_model.trace(prompt_for_trace, scan=True):
@@ -922,6 +918,7 @@ def run_driftguard_session_nnsight(
 
         steered = False
         steering_delta_norm = None
+        cache_reset_needed = False
         logits_for_sample = logits_last
         if m.alarm and (contrastive_vector is not None or safe_reference is not None):
             # Prefer in-pass hidden-space steering to avoid an extra nnsight trace.
@@ -950,6 +947,7 @@ def run_driftguard_session_nnsight(
             logits_for_sample = steering_out.logits
             steered = steering_out.steered
             steering_delta_norm = steering_out.delta_norm
+            cache_reset_needed = steered and cfg.clear_cache_after_steer
 
         token_id = _next_token_id(
             logits=logits_for_sample,
@@ -975,7 +973,8 @@ def run_driftguard_session_nnsight(
             [full_attention_mask, torch.ones_like(new_token, device=device)],
             dim=1,
         )
-        if past_key_values is None:
+        if cache_reset_needed or past_key_values is None:
+            past_key_values = None
             input_ids = full_input_ids
             attention_mask = full_attention_mask
         else:

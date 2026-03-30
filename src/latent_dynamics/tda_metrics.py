@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Protocol
 
 import numpy as np
-from sklearn.decomposition import PCA
 
 from latent_dynamics.config import DriftGuardConfig
 
@@ -80,11 +79,11 @@ class PreFitUMAP:
         except Exception as exc:  # pragma: no cover - optional dependency
             raise RuntimeError("UMAP is unavailable.") from exc
         n_points = max(int(safe_trajectories.shape[0]), 2)
-        n_neighbors = min(15, max(2, int(cfg.topology_window) // 2), n_points - 1)
+        n_neighbors = min(15, n_points - 1)
         self.reducer = umap.UMAP(
             n_components=max(1, min(int(n_components), safe_trajectories.shape[1])),
             n_neighbors=n_neighbors,
-            min_dist=min(0.5, max(0.01, 0.1 * (8.0 / max(float(cfg.topology_window), 1.0)))),
+            min_dist=0.1,
             random_state=int(cfg.random_seed or 0),
             n_jobs=1,
         )
@@ -92,34 +91,6 @@ class PreFitUMAP:
 
     def transform(self, points: np.ndarray) -> np.ndarray:
         return np.asarray(self.reducer.transform(points), dtype=np.float32)
-
-
-class FastPCA:
-    """Stateful PCA for inference-time transforms."""
-
-    def __init__(self, n_components: int) -> None:
-        self.n_components = int(n_components)
-        self._pca: PCA | None = None
-
-    def fit(self, points: np.ndarray) -> None:
-        if points.shape[0] == 0:
-            self._pca = None
-            return
-        k = max(1, min(int(self.n_components), points.shape[0], points.shape[1]))
-        self._pca = PCA(n_components=k, svd_solver="full")
-        try:
-            self._pca.fit(points)
-        except Exception:
-            self._pca = None
-
-    def transform(self, points: np.ndarray) -> np.ndarray:
-        if points.shape[0] == 0:
-            return points
-        if self._pca is None:
-            self.fit(points)
-        if self._pca is None:
-            return pca_reduce(points, n_components=self.n_components)
-        return np.asarray(self._pca.transform(points), dtype=np.float32)
 
 
 _REDUCER_CACHE: dict[str, ManifoldReducer] = {}
@@ -181,21 +152,13 @@ def _reduce_points(points: np.ndarray, cfg: DriftGuardConfig, n_components: int)
                 return pca_reduce(points, n_components=n_components)
             _REDUCER_CACHE[cache_key] = reducer
         return reducer.transform(np.asarray(points, dtype=np.float32))
-    if method == "pca":
-        if points.shape[0] < 2:
-            return pca_reduce(points, n_components=n_components)
-        reducer = _REDUCER_CACHE.get(cache_key)
-        if reducer is None:
-            reducer = FastPCA(n_components=n_components)
-            _REDUCER_CACHE[cache_key] = reducer
-        return reducer.transform(np.asarray(points, dtype=np.float32))
-    if method != "pca":
+    if method not in {"pca", "umap", "none"}:
         warnings.warn(
             f"Unknown reduction method '{method}'; falling back to PCA.",
             RuntimeWarning,
             stacklevel=2,
         )
-        return pca_reduce(points, n_components=n_components)
+    # Always run local-window SVD PCA for dynamic drift tracking.
     return pca_reduce(points, n_components=n_components)
 
 
