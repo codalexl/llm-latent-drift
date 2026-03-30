@@ -36,15 +36,15 @@ class DriftGuardConfig(BaseModel):
     inference_batch_size: int = Field(default=16, ge=1)
 
     # Drift runtime / risk config.
-    pca_components: int = Field(default=8, ge=1, le=64)
+    pca_components: int = Field(default=3, ge=1, le=64)
     tda_enabled: bool = True
     topology_stride: int = Field(
         default=4,
         ge=1,
         validation_alias=AliasChoices("topology_stride", "tda_stride"),
     )
-    topology_window: int = Field(default=24, ge=4)
-    tda_latency_budget_ms: float = Field(default=5.0, ge=0.0)
+    topology_window: int = Field(default=8, ge=4)
+    tda_latency_budget_ms: float = Field(default=50.0, ge=0.0)
     cosine_floor: float = Field(default=0.96, ge=0.0, le=1.0)
     lipschitz_ceiling: float = Field(default=0.20, ge=0.0)
     risk_threshold: float = Field(default=0.5, ge=0.0, le=2.0)
@@ -53,10 +53,10 @@ class DriftGuardConfig(BaseModel):
     topology_weight: float = Field(default=0.25, ge=0.0, le=1.0)
     continuity_scale: float = Field(default=1.0, gt=0.0)
     lipschitz_scale: float = Field(default=1.0, gt=0.0)
-    topology_diameter_scale: float = Field(default=20.0, gt=0.0)
-    persistence_l1_scale: float = Field(default=2.0, gt=0.0)
-    beta0_scale: float = Field(default=24.0, gt=0.0)
-    beta1_scale: float = Field(default=5.0, gt=0.0)
+    topology_diameter_scale: float = Field(default=2.0, gt=0.0)
+    persistence_l1_scale: float = Field(default=5.0, gt=0.0)
+    beta0_scale: float = Field(default=8.0, gt=0.0)
+    beta1_scale: float = Field(default=3.0, gt=0.0)
     topology_diameter_ceiling: float = Field(default=1.50, gt=0.0)
     topology_beta1_ceiling: float = Field(default=1.00, gt=0.0)
     probe_weight: float = Field(default=0.60, ge=0.0, le=1.0)

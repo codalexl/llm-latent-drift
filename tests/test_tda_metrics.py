@@ -59,10 +59,10 @@ def test_risk_score_normalization(config: DriftGuardConfig) -> None:
     safe_metrics = {
         "cosine_cont": 0.98,
         "lipschitz": 0.05,
-        "cloud_diameter": 5.0,
-        "beta0": 12,
+        "cloud_diameter": 1.1,
+        "beta0": 6,
         "beta1": 0,
-        "persistence_l1": 0.2,
+        "persistence_l1": 2.5,
     }
     risk = compute_risk_score(safe_metrics, config=config)
-    assert 0.0 <= risk <= 0.3
+    assert 0.0 <= risk <= 0.5

@@ -150,6 +150,26 @@ def persistence_summary(
     return beta0, beta1, persistence_l1, backend, approximate
 
 
+def _normalize_cloud_median_dist(points: np.ndarray) -> np.ndarray:
+    """Scale point cloud so median pairwise distance is 1.0.
+
+    This standard TDA preprocessing preserves relative geometry (shape,
+    holes, cluster structure) while making diameter and persistence
+    comparable across models and layers with different hidden-state scales.
+    """
+    if points.shape[0] < 2:
+        return points
+    if pdist is not None:
+        dists = pdist(points)
+    else:
+        diffs = points[:, None, :] - points[None, :, :]
+        dists = np.linalg.norm(diffs, axis=-1)[np.triu_indices(points.shape[0], k=1)]
+    med = float(np.median(dists))
+    if med < 1e-12:
+        return points
+    return points / med
+
+
 def topology_snapshot(
     points: np.ndarray,
     config: DriftGuardConfig | None = None,
@@ -160,7 +180,7 @@ def topology_snapshot(
     cfg = config or DriftGuardConfig()
     n_components = cfg.pca_components if pca_components is None else int(pca_components)
     do_tda = cfg.tda_enabled if tda_enabled is None else bool(tda_enabled)
-    reduced = pca_reduce(points, n_components=n_components)
+    reduced = _normalize_cloud_median_dist(pca_reduce(points, n_components=n_components))
     if reduced.shape[0] == 0:
         return TopologySnapshot(
             diameter=0.0,

@@ -164,13 +164,19 @@ def _lipschitz_proxy(x: torch.Tensor, y: torch.Tensor) -> float:
 
 
 def _tda_within_budget(
-    elapsed_ms: float,
     tda_latency_budget_ms: float,
     estimated_tda_ms: float | None,
 ) -> bool:
-    """Gate TDA work using current elapsed time + estimated TDA cost."""
-    estimate = max(float(estimated_tda_ms or 0.0), 0.0)
-    return (float(elapsed_ms) + estimate) <= float(tda_latency_budget_ms)
+    """Gate TDA work using estimated TDA cost vs budget.
+
+    Only the TDA computation cost is checked against the budget -- the model
+    forward-pass time is unavoidable and should not consume the TDA budget.
+    On the first eligible step (no estimate yet), TDA is allowed to run so
+    the runtime can bootstrap a cost estimate for subsequent gating.
+    """
+    if estimated_tda_ms is None:
+        return True
+    return float(estimated_tda_ms) <= float(tda_latency_budget_ms)
 
 
 def _steer_logits_hf(
@@ -423,9 +429,7 @@ def run_driftguard_session(
             lip = _lipschitz_proxy(hidden, prev_hidden)
 
         has_window = len(hidden_history) >= cfg.topology_window
-        elapsed_ms = (perf_counter() - t0) * 1000.0
         within_budget = _tda_within_budget(
-            elapsed_ms=elapsed_ms,
             tda_latency_budget_ms=cfg.tda_latency_budget_ms,
             estimated_tda_ms=tda_estimated_ms,
         )
@@ -451,7 +455,6 @@ def run_driftguard_session(
             if tda_estimated_ms is None:
                 tda_estimated_ms = float(tda_elapsed_ms)
             else:
-                # Light EMA keeps budget gating stable across jittery steps.
                 tda_estimated_ms = float(0.8 * tda_estimated_ms + 0.2 * tda_elapsed_ms)
         if last_topology is not None:
             topology_diam = last_topology.diameter
@@ -691,9 +694,7 @@ def run_driftguard_session_nnsight(
             lip = _lipschitz_proxy(hidden, prev_hidden)
 
         has_window = len(hidden_history) >= cfg.topology_window
-        elapsed_ms = (perf_counter() - t0) * 1000.0
         within_budget = _tda_within_budget(
-            elapsed_ms=elapsed_ms,
             tda_latency_budget_ms=cfg.tda_latency_budget_ms,
             estimated_tda_ms=tda_estimated_ms,
         )

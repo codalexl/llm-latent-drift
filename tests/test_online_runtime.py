@@ -28,7 +28,7 @@ def test_resolve_nnsight_layer_stack_nested_model() -> None:
 def test_runtime_config_exposes_new_tda_controls() -> None:
     cfg = DriftGuardConfig()
     assert cfg.tda_enabled is True
-    assert cfg.pca_components == 8
+    assert cfg.pca_components == 3
 
 
 def test_nnsight_guard_zero_delta_raises_when_fail_closed() -> None:
@@ -44,5 +44,7 @@ def test_nnsight_guard_zero_delta_raises_when_fail_closed() -> None:
 
 
 def test_tda_budget_gate_accounts_for_estimated_cost() -> None:
-    assert _tda_within_budget(2.0, 5.0, 2.5)
-    assert not _tda_within_budget(3.0, 5.0, 2.5)
+    assert _tda_within_budget(5.0, 2.5)
+    assert not _tda_within_budget(5.0, 6.0)
+    # First eligible step (no estimate yet) should always be allowed.
+    assert _tda_within_budget(5.0, None)

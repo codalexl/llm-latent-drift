@@ -313,13 +313,13 @@ def run_driftguard_session_cmd(
     ] = 0.5,
     topology_window: Annotated[
         int, typer.Option(help="Window size for TDA snapshots.")
-    ] = 24,
+    ] = 8,
     topology_stride: Annotated[
         int, typer.Option(help="Stride for TDA snapshot updates.")
     ] = 4,
     tda_latency_budget_ms: Annotated[
         float, typer.Option(help="Per-step latency budget for running TDA.")
-    ] = 5.0,
+    ] = 50.0,
     tda_enabled: Annotated[
         bool,
         typer.Option(
@@ -330,7 +330,7 @@ def run_driftguard_session_cmd(
     pca_components: Annotated[
         int,
         typer.Option(help="PCA components used before topology metrics."),
-    ] = 8,
+    ] = 3,
     topology_diameter_ceiling: Annotated[
         float, typer.Option(help="Ceiling for topology diameter risk term.")
     ] = 1.5,

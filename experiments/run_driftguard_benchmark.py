@@ -630,7 +630,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--risk-threshold", type=float, default=0.5)
     parser.add_argument("--cosine-floor", type=float, default=0.96)
     parser.add_argument("--lipschitz-ceiling", type=float, default=0.20)
-    parser.add_argument("--topology-window", type=int, default=24)
+    parser.add_argument("--topology-window", type=int, default=8)
     parser.add_argument("--topology-stride", type=int, default=4)
     parser.add_argument("--topology-diameter-ceiling", type=float, default=1.5)
     parser.add_argument("--topology-beta1-ceiling", type=float, default=1.0)
