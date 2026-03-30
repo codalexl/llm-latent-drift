@@ -52,8 +52,9 @@ uv run latent-dynamics run-driftguard-session \
 ### 4) DriftGuard threat preset benchmark
 ```bash
 uv run python experiments/run_driftguard_benchmark.py \
-  --model gemma3_4b \
+  --model llama-3.1-8b \
   --preset multi_turn_jailbreak \
+  --num-seeds 5 \
   --quantization-sweep \
   --output-json experiments/outputs/driftguard_benchmark.json
 ```
@@ -76,10 +77,20 @@ uv run python experiments/plot_driftguard_benchmark.py \
   --out-dir experiments/outputs/figures
 ```
 
+### 7) Generate paper-ready Results section
+```bash
+uv run python experiments/generate_results_markdown.py \
+  --report-json experiments/outputs/driftguard_benchmark.json \
+  --output-md experiments/outputs/driftguard_results_section.md \
+  --replace-paper-section
+```
+
 ## Main outputs
 
 - `experiments/outputs/driftguard_benchmark.json`
+- `experiments/outputs/driftguard_baseline_table.csv`
 - `experiments/outputs/figures/` (cosine heatmap, lead-time distribution, latency bar, ablation ROC, optional PCA/persistence)
+- `experiments/outputs/driftguard_results_section.md`
 - `activations/{dataset}/{model}/layer_{N}/` (trajectory shards + metadata)
 
 ## Reproducibility defaults

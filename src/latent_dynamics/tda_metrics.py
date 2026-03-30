@@ -23,6 +23,19 @@ class TopologySnapshot:
     beta1: int
     persistence_l1: float
     tda_enabled: bool
+    tda_backend: str = "none"
+    tda_approximate: bool = False
+
+
+@dataclass
+class RiskComponents:
+    continuity: float
+    lipschitz: float
+    topology: float
+    topology_diameter: float
+    topology_persistence_l1: float
+    topology_beta0: float
+    topology_beta1: float
 
 
 def cloud_diameter(points: np.ndarray) -> float:
@@ -51,41 +64,73 @@ def pca_reduce(points: np.ndarray, n_components: int = 8) -> np.ndarray:
     return u[:, :k] * s[:k]
 
 
-def _ripser_diagrams(points: np.ndarray, maxdim: int) -> list[np.ndarray] | None:
+def _subsample_points(points: np.ndarray, max_points: int, seed: int = 0) -> tuple[np.ndarray, bool]:
+    if points.shape[0] <= max_points:
+        return points, False
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(points.shape[0], size=max_points, replace=False)
+    return points[np.sort(idx)], True
+
+
+def _ripser_diagrams(points: np.ndarray, maxdim: int) -> tuple[list[np.ndarray] | None, str]:
+    """
+    Preferred PH backend.
+
+    Library notes:
+    - Exact dependency: ripser.py package (`ripser`) when available.
+    - Optional fallback: GUDHI (`gudhi`) if ripser import/runtime fails.
+    """
     try:
         from ripser import ripser  # type: ignore[import]
     except Exception as exc:
-        warnings.warn(
-            f"ripser import failed ({exc!r}); using geometry-only fallback.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return None
+        warnings.warn(f"ripser import failed ({exc!r}); trying gudhi fallback.", RuntimeWarning, stacklevel=2)
+        return _gudhi_diagrams(points, maxdim=maxdim)
     try:
         out = ripser(points, maxdim=maxdim)
     except Exception as exc:
-        warnings.warn(
-            f"ripser runtime failed ({exc!r}); using geometry-only fallback.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return None
+        warnings.warn(f"ripser runtime failed ({exc!r}); trying gudhi fallback.", RuntimeWarning, stacklevel=2)
+        return _gudhi_diagrams(points, maxdim=maxdim)
     diagrams = out.get("dgms")
     if not isinstance(diagrams, list):
         warnings.warn(
-            "ripser returned unexpected diagram format; using geometry-only fallback.",
+            "ripser returned unexpected diagram format; trying gudhi fallback.",
             RuntimeWarning,
             stacklevel=2,
         )
-        return None
-    return diagrams
+        return _gudhi_diagrams(points, maxdim=maxdim)
+    return diagrams, "ripser"
 
 
-def persistence_summary(points: np.ndarray, maxdim: int = 1) -> tuple[int, int, float]:
+def _gudhi_diagrams(points: np.ndarray, maxdim: int) -> tuple[list[np.ndarray] | None, str]:
+    try:
+        import gudhi as gd  # type: ignore[import]
+    except Exception:
+        return None, "none"
+    try:
+        rips = gd.RipsComplex(points=points)
+        simplex_tree = rips.create_simplex_tree(max_dimension=maxdim + 1)
+        diag = simplex_tree.persistence()
+        by_dim: list[list[list[float]]] = [[] for _ in range(maxdim + 1)]
+        for dim, pair in diag:
+            if 0 <= dim <= maxdim:
+                by_dim[dim].append([float(pair[0]), float(pair[1])])
+        return [np.asarray(rows, dtype=np.float32) for rows in by_dim], "gudhi"
+    except Exception:
+        return None, "none"
+
+
+def persistence_summary(
+    points: np.ndarray,
+    maxdim: int = 1,
+    *,
+    approximate_max_points: int = 32,
+    subsample_seed: int = 0,
+) -> tuple[int, int, float, str, bool]:
     """Compute lightweight Betti proxies and persistence mass."""
-    diagrams = _ripser_diagrams(points, maxdim=maxdim)
+    tda_points, approximate = _subsample_points(points, max_points=max(2, int(approximate_max_points)), seed=subsample_seed)
+    diagrams, backend = _ripser_diagrams(tda_points, maxdim=maxdim)
     if diagrams is None:
-        return 0, 0, 0.0
+        return 0, 0, 0.0, "none", approximate
 
     def finite_lifetimes(dgm: np.ndarray) -> np.ndarray:
         if dgm.size == 0:
@@ -102,7 +147,7 @@ def persistence_summary(points: np.ndarray, maxdim: int = 1) -> tuple[int, int, 
     beta0 = int(np.sum(life0 > 1e-6))
     beta1 = int(np.sum(life1 > 1e-6))
     persistence_l1 = float(np.sum(life0) + np.sum(life1))
-    return beta0, beta1, persistence_l1
+    return beta0, beta1, persistence_l1, backend, approximate
 
 
 def topology_snapshot(
@@ -123,6 +168,8 @@ def topology_snapshot(
             beta1=0,
             persistence_l1=0.0,
             tda_enabled=False,
+            tda_backend="none",
+            tda_approximate=False,
         )
     if not do_tda:
         return TopologySnapshot(
@@ -131,22 +178,30 @@ def topology_snapshot(
             beta1=0,
             persistence_l1=0.0,
             tda_enabled=False,
+            tda_backend="none",
+            tda_approximate=False,
         )
-    beta0, beta1, persistence_l1 = persistence_summary(reduced, maxdim=1)
+    beta0, beta1, persistence_l1, backend, approximate = persistence_summary(
+        reduced,
+        maxdim=1,
+        approximate_max_points=cfg.topology_window,
+        subsample_seed=int(cfg.random_seed or 0),
+    )
     return TopologySnapshot(
         diameter=cloud_diameter(reduced),
         beta0=beta0,
         beta1=beta1,
         persistence_l1=persistence_l1,
         tda_enabled=True,
+        tda_backend=backend,
+        tda_approximate=approximate,
     )
 
 
-def compute_risk_score(
+def decompose_risk_components(
     metrics: Mapping[str, float | int | None],
     config: DriftGuardConfig | None = None,
-) -> float:
-    """Compute fused drift risk from continuity, smoothness, and topology terms."""
+) -> RiskComponents:
     cfg = config or DriftGuardConfig()
     cosine = metrics.get("cosine_cont")
     lipschitz = metrics.get("lipschitz")
@@ -161,6 +216,7 @@ def compute_risk_score(
             1.0 - cfg.cosine_floor,
             1e-6,
         )
+        continuity_risk = continuity_risk / max(float(cfg.continuity_scale), 1e-6)
 
     lipschitz_risk = 0.0
     if lipschitz is not None:
@@ -168,23 +224,46 @@ def compute_risk_score(
             cfg.lipschitz_ceiling,
             1e-6,
         )
+        lipschitz_risk = lipschitz_risk / max(float(cfg.lipschitz_scale), 1e-6)
 
-    topology_risk = 0.0
+    topo_diam_risk = 0.0
     if cloud_diam is not None:
-        topology_risk += 0.40 * (max(float(cloud_diam), 0.0) / max(cfg.topology_diameter_scale, 1e-6))
-    if persistence_l1 is not None:
-        topology_risk += 0.30 * (
-            max(float(persistence_l1), 0.0) / max(cfg.persistence_l1_scale, 1e-6)
-        )
-    if beta0 is not None:
-        topology_risk += 0.15 * (max(float(beta0), 0.0) / max(cfg.beta0_scale, 1e-6))
-    if beta1 is not None:
-        topology_risk += 0.15 * (max(float(beta1), 0.0) / max(cfg.beta1_scale, 1e-6))
-    topology_risk = min(topology_risk, 2.0)
+        topo_diam_risk = 0.40 * (max(float(cloud_diam), 0.0) / max(cfg.topology_diameter_scale, 1e-6))
 
+    topo_p1_risk = 0.0
+    if persistence_l1 is not None:
+        topo_p1_risk = 0.30 * (max(float(persistence_l1), 0.0) / max(cfg.persistence_l1_scale, 1e-6))
+
+    topo_b0_risk = 0.0
+    if beta0 is not None:
+        topo_b0_risk = 0.15 * (max(float(beta0), 0.0) / max(cfg.beta0_scale, 1e-6))
+
+    topo_b1_risk = 0.0
+    if beta1 is not None:
+        topo_b1_risk = 0.15 * (max(float(beta1), 0.0) / max(cfg.beta1_scale, 1e-6))
+
+    topology_risk = min(topo_diam_risk + topo_p1_risk + topo_b0_risk + topo_b1_risk, 2.0)
+    return RiskComponents(
+        continuity=continuity_risk,
+        lipschitz=lipschitz_risk,
+        topology=topology_risk,
+        topology_diameter=topo_diam_risk,
+        topology_persistence_l1=topo_p1_risk,
+        topology_beta0=topo_b0_risk,
+        topology_beta1=topo_b1_risk,
+    )
+
+
+def compute_risk_score(
+    metrics: Mapping[str, float | int | None],
+    config: DriftGuardConfig | None = None,
+) -> float:
+    """Compute fused drift risk from continuity, smoothness, and topology terms."""
+    cfg = config or DriftGuardConfig()
+    parts = decompose_risk_components(metrics, config=cfg)
     score = (
-        cfg.continuity_weight * continuity_risk
-        + cfg.lipschitz_weight * lipschitz_risk
-        + cfg.topology_weight * topology_risk
+        cfg.continuity_weight * parts.continuity
+        + cfg.lipschitz_weight * parts.lipschitz
+        + cfg.topology_weight * parts.topology
     )
     return float(np.clip(score, 0.0, 1.5))

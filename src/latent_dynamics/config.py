@@ -51,12 +51,19 @@ class DriftGuardConfig(BaseModel):
     continuity_weight: float = Field(default=0.40, ge=0.0, le=1.0)
     lipschitz_weight: float = Field(default=0.35, ge=0.0, le=1.0)
     topology_weight: float = Field(default=0.25, ge=0.0, le=1.0)
+    continuity_scale: float = Field(default=1.0, gt=0.0)
+    lipschitz_scale: float = Field(default=1.0, gt=0.0)
     topology_diameter_scale: float = Field(default=20.0, gt=0.0)
     persistence_l1_scale: float = Field(default=2.0, gt=0.0)
     beta0_scale: float = Field(default=24.0, gt=0.0)
     beta1_scale: float = Field(default=5.0, gt=0.0)
     topology_diameter_ceiling: float = Field(default=1.50, gt=0.0)
     topology_beta1_ceiling: float = Field(default=1.00, gt=0.0)
+    probe_weight: float = Field(default=0.60, ge=0.0, le=1.0)
+    contrastive_steering_strength: float = Field(default=0.25, ge=0.0, le=1.0)
+    use_contrastive_probe: bool = True
+    safe_prompts: list[str] = Field(default_factory=list)
+    harmful_prompts: list[str] = Field(default_factory=list)
     steering_strength: float = Field(default=0.20, ge=0.0, le=1.0)
     use_nnsight: bool = False
     nnsight_full_prefix_trace: bool = True

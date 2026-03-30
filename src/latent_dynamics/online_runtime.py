@@ -9,9 +9,18 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from time import perf_counter
 
+from latent_dynamics.contrastive_vectors import compute_contrastive_vector
 from latent_dynamics.config import DriftGuardConfig
-from latent_dynamics.steering import steer_toward_reference, steer_with_nnsight
-from latent_dynamics.tda_metrics import compute_risk_score, topology_snapshot
+from latent_dynamics.steering import (
+    apply_contrastive_steering,
+    steer_toward_reference,
+    steer_with_nnsight,
+)
+from latent_dynamics.tda_metrics import (
+    compute_risk_score,
+    decompose_risk_components,
+    topology_snapshot,
+)
 
 
 @dataclass
@@ -24,8 +33,19 @@ class DriftStep:
     topology_beta1: int | None
     topology_persistence_l1: float | None
     risk_score: float
+    continuity_risk: float
+    lipschitz_risk: float
+    topology_risk: float
+    topology_diameter_risk: float
+    topology_persistence_l1_risk: float
+    topology_beta0_risk: float
+    topology_beta1_risk: float
+    tda_backend: str | None
+    tda_approximate: bool
     alarm: bool
     steered: bool
+    probe_risk: float | None = None
+    dynamics_risk: float | None = None
     steering_delta_norm: float | None = None
     latency_ms: float | None = None
 
@@ -86,6 +106,40 @@ def _materialize_proxy(value: object) -> object:
     return value.value if hasattr(value, "value") else value
 
 
+def _resolve_contrastive_vector(
+    cfg: DriftGuardConfig,
+    layer_idx: int,
+    contrastive_vectors: dict[str, list[float]] | None = None,
+) -> torch.Tensor | None:
+    if contrastive_vectors:
+        key = f"layer_{layer_idx}"
+        if key in contrastive_vectors:
+            vec = np.asarray(contrastive_vectors[key], dtype=np.float32)
+            if vec.ndim == 1 and vec.size > 0:
+                return torch.as_tensor(vec)
+    return None
+
+
+def _project_probe_risk(hidden: torch.Tensor, contrastive_vector: torch.Tensor | None) -> float:
+    if contrastive_vector is None:
+        return 0.0
+    h = hidden.squeeze(0).float()
+    vec = contrastive_vector.to(h.device).float()
+    if vec.ndim != 1 or vec.numel() != h.numel():
+        return 0.0
+    unit = vec / torch.clamp(torch.norm(vec, p=2), min=1e-8)
+    proj = float(torch.dot(h, unit).item())
+    return max(0.0, proj)
+
+
+def _hybrid_risk_score(cfg: DriftGuardConfig, probe_risk: float, dynamics_risk: float) -> float:
+    if not cfg.use_contrastive_probe:
+        return float(np.clip(dynamics_risk, 0.0, 1.5))
+    probe_w = float(np.clip(cfg.probe_weight, 0.0, 1.0))
+    score = probe_w * float(probe_risk) + (1.0 - probe_w) * float(dynamics_risk)
+    return float(np.clip(score, 0.0, 1.5))
+
+
 def _maybe_clear_device_cache(device: str) -> None:
     if device.startswith("cuda") and torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -123,14 +177,24 @@ def _steer_logits_hf(
     model: object,
     hidden: torch.Tensor,
     logits_last: torch.Tensor,
-    safe_reference: torch.Tensor,
+    safe_reference: torch.Tensor | None,
+    contrastive_vector: torch.Tensor | None,
     cfg: DriftGuardConfig,
 ) -> SteeringIntervention:
-    steered_hidden, steering_result = steer_toward_reference(
-        hidden=hidden,
-        reference=safe_reference.to(hidden.device),
-        strength=cfg.steering_strength,
-    )
+    if contrastive_vector is not None:
+        steered_hidden, steering_result = apply_contrastive_steering(
+            hidden=hidden,
+            contrastive_direction=contrastive_vector.to(hidden.device),
+            strength=cfg.contrastive_steering_strength,
+        )
+    elif safe_reference is not None:
+        steered_hidden, steering_result = steer_toward_reference(
+            hidden=hidden,
+            reference=safe_reference.to(hidden.device),
+            strength=cfg.steering_strength,
+        )
+    else:
+        return SteeringIntervention(logits=logits_last, steered=False, delta_norm=None)
     if not steering_result.applied:
         return SteeringIntervention(
             logits=logits_last,
@@ -151,7 +215,8 @@ def _steer_logits_nnsight(
     nns_model: object,
     prompt: str,
     logits_last: torch.Tensor,
-    safe_reference: torch.Tensor,
+    safe_reference: torch.Tensor | None,
+    contrastive_vector: torch.Tensor | None,
     cfg: DriftGuardConfig,
 ) -> SteeringIntervention:
     try:
@@ -160,7 +225,12 @@ def _steer_logits_nnsight(
             prompt=prompt,
             safe_ref_hidden=safe_reference,
             layer_idx=cfg.layer_idx,
-            alpha=cfg.steering_strength,
+            alpha=(
+                cfg.contrastive_steering_strength
+                if contrastive_vector is not None
+                else cfg.steering_strength
+            ),
+            contrastive_direction=contrastive_vector,
         )
         logits_for_sample = torch.as_tensor(steer_out["logits"]).to(logits_last.device)
         delta_norm = float(torch.norm(logits_for_sample - logits_last, p=2).item())
@@ -183,7 +253,8 @@ def _apply_steering_intervention(
     device: str,
     logits_last: torch.Tensor,
     hidden: torch.Tensor,
-    safe_reference: torch.Tensor,
+    safe_reference: torch.Tensor | None,
+    contrastive_vector: torch.Tensor | None = None,
     model: object | None = None,
     nns_model: object | None = None,
     prompt: str | None = None,
@@ -197,6 +268,7 @@ def _apply_steering_intervention(
             hidden=hidden,
             logits_last=logits_last,
             safe_reference=safe_reference,
+            contrastive_vector=contrastive_vector,
             cfg=cfg,
         )
     elif backend == "nnsight":
@@ -207,6 +279,7 @@ def _apply_steering_intervention(
             prompt=prompt,
             logits_last=logits_last,
             safe_reference=safe_reference,
+            contrastive_vector=contrastive_vector,
             cfg=cfg,
         )
     else:
@@ -260,8 +333,15 @@ def run_driftguard_session(
     cfg: DriftGuardConfig,
     device: str,
     safe_reference: torch.Tensor | None = None,
+    contrastive_vectors: dict[str, list[float]] | None = None,
 ) -> DriftSessionResult:
-    """Run KV-cache online monitoring with optional latent steering."""
+    """Run full online DriftGuard inference loop with optional steering."""
+    if cfg.random_seed is not None:
+        np.random.seed(cfg.random_seed)
+        torch.manual_seed(cfg.random_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(cfg.random_seed)
+
     if cfg.use_nnsight and hasattr(model, "trace"):
         return run_driftguard_session_nnsight(
             nns_model=model,
@@ -270,13 +350,8 @@ def run_driftguard_session(
             cfg=cfg,
             device=device,
             safe_reference=safe_reference,
+            contrastive_vectors=contrastive_vectors,
         )
-
-    if cfg.random_seed is not None:
-        np.random.seed(cfg.random_seed)
-        torch.manual_seed(cfg.random_seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(cfg.random_seed)
 
     encoded = tokenizer(prompt, return_tensors="pt")
     full_input_ids = encoded["input_ids"].to(device)
@@ -296,6 +371,30 @@ def run_driftguard_session(
     tda_skipped_budget_steps = 0
     tda_skipped_stride_steps = 0
     tda_estimated_ms: float | None = None
+    contrastive_vector = _resolve_contrastive_vector(
+        cfg=cfg,
+        layer_idx=cfg.layer_idx,
+        contrastive_vectors=contrastive_vectors,
+    )
+    if (
+        contrastive_vector is None
+        and cfg.safe_prompts
+        and cfg.harmful_prompts
+        and hasattr(model, "__call__")
+    ):
+        try:
+            vec_np = compute_contrastive_vector(
+                model=model,
+                tokenizer=tokenizer,
+                safe_prompts=cfg.safe_prompts,
+                harmful_prompts=cfg.harmful_prompts,
+                layer_idx=cfg.layer_idx,
+                cfg=cfg,
+                device=device,
+            )
+            contrastive_vector = torch.as_tensor(vec_np)
+        except Exception:
+            contrastive_vector = None
 
     for step_idx in range(cfg.max_new_tokens):
         t0 = perf_counter()
@@ -359,17 +458,24 @@ def run_driftguard_session(
             topology_beta0 = last_topology.beta0
             topology_beta1 = last_topology.beta1
             topology_persistence_l1 = last_topology.persistence_l1
+        tda_backend = last_topology.tda_backend if last_topology is not None else None
+        tda_approximate = bool(last_topology.tda_approximate) if last_topology is not None else False
 
-        risk_score = compute_risk_score(
-            {
-                "cosine_cont": cos,
-                "lipschitz": lip,
-                "cloud_diameter": topology_diam,
-                "beta0": topology_beta0,
-                "beta1": topology_beta1,
-                "persistence_l1": topology_persistence_l1,
-            },
-            config=risk_cfg,
+        risk_metrics = {
+            "cosine_cont": cos,
+            "lipschitz": lip,
+            "cloud_diameter": topology_diam,
+            "beta0": topology_beta0,
+            "beta1": topology_beta1,
+            "persistence_l1": topology_persistence_l1,
+        }
+        risk_parts = decompose_risk_components(risk_metrics, config=risk_cfg)
+        dynamics_risk = compute_risk_score(risk_metrics, config=risk_cfg)
+        probe_risk = _project_probe_risk(hidden, contrastive_vector)
+        risk_score = _hybrid_risk_score(
+            cfg=risk_cfg,
+            probe_risk=probe_risk,
+            dynamics_risk=dynamics_risk,
         )
         alarm = risk_score >= cfg.risk_threshold
 
@@ -377,7 +483,7 @@ def run_driftguard_session(
         steered = False
         steering_delta_norm = None
         cache_reset_needed = False
-        if alarm and safe_reference is not None:
+        if alarm and (contrastive_vector is not None or safe_reference is not None):
             steering_out = _apply_steering_intervention(
                 backend="hf",
                 cfg=cfg,
@@ -385,6 +491,7 @@ def run_driftguard_session(
                 logits_last=logits,
                 hidden=hidden,
                 safe_reference=safe_reference,
+                contrastive_vector=contrastive_vector,
                 model=model,
             )
             logits = steering_out.logits
@@ -409,8 +516,19 @@ def run_driftguard_session(
                 topology_beta1=topology_beta1,
                 topology_persistence_l1=topology_persistence_l1,
                 risk_score=risk_score,
+                continuity_risk=risk_parts.continuity,
+                lipschitz_risk=risk_parts.lipschitz,
+                topology_risk=risk_parts.topology,
+                topology_diameter_risk=risk_parts.topology_diameter,
+                topology_persistence_l1_risk=risk_parts.topology_persistence_l1,
+                topology_beta0_risk=risk_parts.topology_beta0,
+                topology_beta1_risk=risk_parts.topology_beta1,
+                tda_backend=tda_backend,
+                tda_approximate=tda_approximate,
                 alarm=alarm,
                 steered=steered,
+                probe_risk=probe_risk if contrastive_vector is not None else None,
+                dynamics_risk=dynamics_risk,
                 steering_delta_norm=steering_delta_norm,
                 latency_ms=latency_ms,
             )
@@ -499,6 +617,7 @@ def run_driftguard_session_nnsight(
     cfg: DriftGuardConfig,
     device: str,
     safe_reference: torch.Tensor | None = None,
+    contrastive_vectors: dict[str, list[float]] | None = None,
 ) -> DriftSessionResult:
     """
     nnsight-backed online drift loop.
@@ -524,6 +643,11 @@ def run_driftguard_session_nnsight(
     tda_skipped_budget_steps = 0
     tda_skipped_stride_steps = 0
     tda_estimated_ms: float | None = None
+    contrastive_vector = _resolve_contrastive_vector(
+        cfg=cfg,
+        layer_idx=cfg.layer_idx,
+        contrastive_vectors=contrastive_vectors,
+    )
 
     for step_idx in range(cfg.max_new_tokens):
         t0 = perf_counter()
@@ -601,24 +725,31 @@ def run_driftguard_session_nnsight(
             topology_beta0 = last_topology.beta0
             topology_beta1 = last_topology.beta1
             topology_persistence_l1 = last_topology.persistence_l1
+        tda_backend = last_topology.tda_backend if last_topology is not None else None
+        tda_approximate = bool(last_topology.tda_approximate) if last_topology is not None else False
 
-        risk_score = compute_risk_score(
-            {
-                "cosine_cont": cos,
-                "lipschitz": lip,
-                "cloud_diameter": topology_diam,
-                "beta0": topology_beta0,
-                "beta1": topology_beta1,
-                "persistence_l1": topology_persistence_l1,
-            },
-            config=risk_cfg,
+        risk_metrics = {
+            "cosine_cont": cos,
+            "lipschitz": lip,
+            "cloud_diameter": topology_diam,
+            "beta0": topology_beta0,
+            "beta1": topology_beta1,
+            "persistence_l1": topology_persistence_l1,
+        }
+        risk_parts = decompose_risk_components(risk_metrics, config=risk_cfg)
+        dynamics_risk = compute_risk_score(risk_metrics, config=risk_cfg)
+        probe_risk = _project_probe_risk(hidden, contrastive_vector)
+        risk_score = _hybrid_risk_score(
+            cfg=risk_cfg,
+            probe_risk=probe_risk,
+            dynamics_risk=dynamics_risk,
         )
         alarm = risk_score >= cfg.risk_threshold
         steered = False
         steering_delta_norm = None
 
         logits_for_sample = logits_last
-        if alarm and safe_reference is not None:
+        if alarm and (contrastive_vector is not None or safe_reference is not None):
             steering_out = _apply_steering_intervention(
                 backend="nnsight",
                 cfg=cfg,
@@ -626,6 +757,7 @@ def run_driftguard_session_nnsight(
                 logits_last=logits_last,
                 hidden=hidden,
                 safe_reference=safe_reference,
+                contrastive_vector=contrastive_vector,
                 nns_model=nns_model,
                 prompt=running_text,
             )
@@ -650,8 +782,19 @@ def run_driftguard_session_nnsight(
                 topology_beta1=topology_beta1,
                 topology_persistence_l1=topology_persistence_l1,
                 risk_score=risk_score,
+                continuity_risk=risk_parts.continuity,
+                lipschitz_risk=risk_parts.lipschitz,
+                topology_risk=risk_parts.topology,
+                topology_diameter_risk=risk_parts.topology_diameter,
+                topology_persistence_l1_risk=risk_parts.topology_persistence_l1,
+                topology_beta0_risk=risk_parts.topology_beta0,
+                topology_beta1_risk=risk_parts.topology_beta1,
+                tda_backend=tda_backend,
+                tda_approximate=tda_approximate,
                 alarm=alarm,
                 steered=steered,
+                probe_risk=probe_risk if contrastive_vector is not None else None,
+                dynamics_risk=dynamics_risk,
                 steering_delta_norm=steering_delta_norm,
                 latency_ms=latency_ms,
             )

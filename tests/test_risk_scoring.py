@@ -33,6 +33,23 @@ def test_high_risk_regime_scores_higher() -> None:
     assert 0.0 <= unsafe <= 1.5
 
 
+def test_continuity_and_lipschitz_scales_reduce_component_dominance() -> None:
+    metrics = {
+        "cosine_cont": 0.20,
+        "lipschitz": 1.20,
+        "cloud_diameter": 0.0,
+        "beta0": 0,
+        "beta1": 0,
+        "persistence_l1": 0.0,
+    }
+    base = compute_risk_score(metrics, DriftGuardConfig())
+    scaled = compute_risk_score(
+        metrics,
+        DriftGuardConfig(continuity_scale=20.0, lipschitz_scale=40.0),
+    )
+    assert scaled < base
+
+
 @given(st.floats(min_value=0.0, max_value=30.0))
 def test_topology_monotonicity_for_diameter(diam: float) -> None:
     cfg = DriftGuardConfig()

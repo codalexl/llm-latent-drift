@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -13,11 +15,37 @@ _TORCH_DTYPES = {
 
 
 def resolve_device(preferred: str | None = None) -> str:
+    """Pick compute device. Honors explicit preference but falls back to CPU when unusable."""
     if preferred:
-        return preferred
+        dev = preferred.strip()
+        low = dev.lower()
+        if low == "cuda" or low.startswith("cuda:"):
+            if not torch.cuda.is_available():
+                warnings.warn(
+                    "CUDA was requested but torch.cuda.is_available() is False; using CPU.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                return "cpu"
+            return dev if low.startswith("cuda:") else "cuda"
+        if low == "mps":
+            mps_mod = getattr(torch.backends, "mps", None)
+            if mps_mod is None or not mps_mod.is_available():
+                warnings.warn(
+                    "MPS was requested but torch.backends.mps.is_available() is False "
+                    "(e.g. unsupported macOS/GPU for this PyTorch build); using CPU.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                return "cpu"
+            return "mps"
+        if low == "cpu":
+            return "cpu"
+        return dev
     if torch.cuda.is_available():
         return "cuda"
-    if torch.backends.mps.is_available():
+    mps_mod = getattr(torch.backends, "mps", None)
+    if mps_mod is not None and mps_mod.is_available():
         return "mps"
     return "cpu"
 

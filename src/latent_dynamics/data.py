@@ -12,6 +12,21 @@ from latent_dynamics.config import DATASET_REGISTRY, TOY_CONTRASTIVE, DatasetSpe
 
 STRATIFY_SEED = 42
 
+_HF_FETCH_HINT = (
+    "Hugging Face dataset download failed.\n"
+    "- Proxy 403 / ProxyError: unset HTTP_PROXY and HTTPS_PROXY for this run, or add "
+    "huggingface.co to NO_PROXY, or set LATENT_DYNAMICS_BYPASS_PROXY_FOR_HF=1 in .env "
+    "(loaded by latent_dynamics._env).\n"
+    "- Offline: prefetch the dataset, then run with HF_HUB_OFFLINE=1."
+)
+
+
+def _load_dataset_remote(*args: object, **kwargs: object) -> Any:
+    try:
+        return load_dataset(*args, **kwargs)  # type: ignore[arg-type]
+    except Exception as e:
+        raise RuntimeError(f"{_HF_FETCH_HINT}\nCaused by: {e!r}") from e
+
 
 def _label_from_row(row: dict[str, Any], spec: DatasetSpec) -> int | None:
     if spec.label_field is not None:
@@ -85,7 +100,7 @@ def load_examples(
     if spec.path == "toy_contrastive":
         ds = Dataset.from_list(TOY_CONTRASTIVE)
     elif spec.path == "allenai/wildjailbreak":
-        ds = load_dataset(
+        ds = _load_dataset_remote(
             spec.path,
             name=spec.split,
             split="train",
@@ -93,7 +108,7 @@ def load_examples(
             keep_default_na=False,
         )
     else:
-        ds = load_dataset(spec.path, split=spec.split)
+        ds = _load_dataset_remote(spec.path, split=spec.split)
 
     if max_samples and len(ds) > max_samples:
         if stratify_labels:

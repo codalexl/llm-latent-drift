@@ -346,9 +346,22 @@ def run_driftguard_session_cmd(
     topology_weight: Annotated[
         float, typer.Option(help="Weight for topology risk term.")
     ] = 0.25,
+    probe_weight: Annotated[
+        float, typer.Option(help="Weight for contrastive probe in hybrid risk.")
+    ] = 0.60,
     steering_strength: Annotated[
         float, typer.Option(help="Intervention strength toward safe reference.")
     ] = 0.20,
+    contrastive_steering_strength: Annotated[
+        float, typer.Option(help="Activation delta scale for contrastive steering.")
+    ] = 0.25,
+    use_contrastive_probe: Annotated[
+        bool,
+        typer.Option(
+            "--use-contrastive-probe/--no-use-contrastive-probe",
+            help="Fuse projection-based probe risk with dynamics/TDA risk.",
+        ),
+    ] = True,
     use_nnsight: Annotated[
         bool,
         typer.Option(
@@ -396,6 +409,16 @@ def run_driftguard_session_cmd(
             )
         ),
     ] = [],
+    harmful_reference_prompt: Annotated[
+        List[str],
+        typer.Option(
+            help=(
+                "Repeatable harmful prompts used to compute contrastive direction. "
+                "When provided together with safe prompts, hybrid probe and "
+                "contrastive steering are enabled."
+            )
+        ),
+    ] = [],
     output_json: Annotated[
         Optional[Path],
         typer.Option(help="Optional output JSON path for per-step drift logs."),
@@ -403,6 +426,7 @@ def run_driftguard_session_cmd(
 ) -> None:
     """Run a single online session with early-warning + activation steering."""
     from latent_dynamics.models import load_model_and_tokenizer, resolve_device
+    from latent_dynamics.contrastive_vectors import compute_contrastive_vector
     from latent_dynamics.online_runtime import (
         DriftGuardConfig,
         estimate_safe_reference,
@@ -443,7 +467,12 @@ def run_driftguard_session_cmd(
         continuity_weight=continuity_weight,
         lipschitz_weight=lipschitz_weight,
         topology_weight=topology_weight,
+        probe_weight=probe_weight,
         steering_strength=steering_strength,
+        contrastive_steering_strength=contrastive_steering_strength,
+        use_contrastive_probe=use_contrastive_probe,
+        safe_prompts=list(safe_reference_prompt),
+        harmful_prompts=list(harmful_reference_prompt),
         use_nnsight=use_nnsight,
         nnsight_full_prefix_trace=nnsight_full_prefix_trace,
         nnsight_fail_open=nnsight_fail_open,
@@ -459,6 +488,21 @@ def run_driftguard_session_cmd(
             device=resolved_device,
             layer_idx=layer_idx,
         )
+    contrastive_vectors: dict[str, list[float]] | None = None
+    if safe_reference_prompt and harmful_reference_prompt:
+        try:
+            vec = compute_contrastive_vector(
+                model=mdl,
+                tokenizer=tokenizer,
+                safe_prompts=safe_reference_prompt,
+                harmful_prompts=harmful_reference_prompt,
+                layer_idx=layer_idx,
+                cfg=cfg,
+                device=resolved_device,
+            )
+            contrastive_vectors = {f"layer_{layer_idx}": vec.astype(float).tolist()}
+        except Exception as exc:
+            typer.echo(f"Warning: contrastive vector computation failed: {exc}", err=True)
 
     active_model = mdl
     if use_nnsight:
@@ -475,6 +519,7 @@ def run_driftguard_session_cmd(
         cfg=cfg,
         device=resolved_device,
         safe_reference=safe_reference,
+        contrastive_vectors=contrastive_vectors,
     )
     payload = {
         "model": model.value,
@@ -500,6 +545,17 @@ def run_driftguard_session_cmd(
                 "topology_beta1": s.topology_beta1,
                 "topology_persistence_l1": s.topology_persistence_l1,
                 "risk_score": s.risk_score,
+                "probe_risk": s.probe_risk,
+                "dynamics_risk": s.dynamics_risk,
+                "continuity_risk": s.continuity_risk,
+                "lipschitz_risk": s.lipschitz_risk,
+                "topology_risk": s.topology_risk,
+                "topology_diameter_risk": s.topology_diameter_risk,
+                "topology_persistence_l1_risk": s.topology_persistence_l1_risk,
+                "topology_beta0_risk": s.topology_beta0_risk,
+                "topology_beta1_risk": s.topology_beta1_risk,
+                "tda_backend": s.tda_backend,
+                "tda_approximate": s.tda_approximate,
                 "alarm": s.alarm,
                 "steered": s.steered,
                 "steering_delta_norm": s.steering_delta_norm,
@@ -528,7 +584,12 @@ def calibrate(
         int, typer.Option(help="Maximum labeled samples for calibration run.")
     ] = 24,
     output: Annotated[
-        Path, typer.Option(help="Where to write calibration JSON.")
+        Path,
+        typer.Option(
+            "--output",
+            "--calibration-output",
+            help="Where to write calibration JSON.",
+        ),
     ] = Path("calibration_results.json"),
     layer_idx: Annotated[
         int, typer.Option(help="Layer index used by online runtime.")

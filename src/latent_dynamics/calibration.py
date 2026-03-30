@@ -13,8 +13,33 @@ from sklearn.metrics import (
 )
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from latent_dynamics.contrastive_vectors import compute_contrastive_vector
 from latent_dynamics.config import DriftGuardConfig
 from latent_dynamics.online_runtime import run_driftguard_session
+
+
+def _is_better_candidate(
+    *,
+    auc: float,
+    pr_auc: float,
+    score_std: float,
+    best_auc: float,
+    best_pr_auc: float,
+    best_score_std: float,
+    eps: float = 1e-8,
+) -> bool:
+    """Stable tie-breaking for calibration search to avoid degenerate all-zero picks."""
+    if auc > best_auc + eps:
+        return True
+    if abs(auc - best_auc) <= eps and pr_auc > best_pr_auc + eps:
+        return True
+    if (
+        abs(auc - best_auc) <= eps
+        and abs(pr_auc - best_pr_auc) <= eps
+        and score_std > best_score_std + eps
+    ):
+        return True
+    return False
 
 
 def _threshold_metrics(scores: np.ndarray, labels: np.ndarray, threshold: float) -> tuple[float, float]:
@@ -113,6 +138,24 @@ def _apply_scales(
     return np.clip(topo, 0.0, 2.0)
 
 
+def _compose_scaled_score(
+    c_raw: np.ndarray,
+    l_raw: np.ndarray,
+    topo_scaled: np.ndarray,
+    *,
+    weights: tuple[float, float, float],
+    cl_scales: tuple[float, float],
+) -> np.ndarray:
+    c_scale, l_scale = cl_scales
+    continuity = c_raw / max(float(c_scale), 1e-6)
+    lipschitz = l_raw / max(float(l_scale), 1e-6)
+    return (
+        weights[0] * continuity
+        + weights[1] * lipschitz
+        + weights[2] * topo_scaled
+    )
+
+
 def calibrate_risk_score(
     cfg: DriftGuardConfig,
     model: AutoModelForCausalLM | object,
@@ -158,46 +201,82 @@ def calibrate_risk_score(
     l_raw = np.asarray([x[1] for x in prompt_components], dtype=np.float64)
     t_raw = np.stack([x[2] for x in prompt_components], axis=0)
     best_auc = -1.0
+    best_pr_auc = -1.0
+    best_score_std = -1.0
     best_weights = (
         float(cfg.continuity_weight),
         float(cfg.lipschitz_weight),
         float(cfg.topology_weight),
     )
     best_scales = (
+        float(cfg.continuity_scale),
+        float(cfg.lipschitz_scale),
         float(cfg.topology_diameter_scale),
         float(cfg.persistence_l1_scale),
         float(cfg.beta0_scale),
         float(cfg.beta1_scale),
     )
-    default_topology = _apply_scales(t_raw, best_scales)
+    default_topology = _apply_scales(t_raw, best_scales[2:])
     best_scores = np.clip(
-        best_weights[0] * c_raw + best_weights[1] * l_raw + best_weights[2] * default_topology,
+        _compose_scaled_score(
+            c_raw,
+            l_raw,
+            default_topology,
+            weights=best_weights,
+            cl_scales=best_scales[:2],
+        ),
         0.0,
         1.5,
     )
     if len(np.unique(y)) >= 2:
+        # Initialize from defaults so tie-cases don't collapse to first grid point.
+        best_auc = float(roc_auc_score(y, best_scores))
+        best_pr_auc = float(average_precision_score(y, best_scores))
+        best_score_std = float(np.std(best_scores))
+
+        c_grid = _quantile_scales(c_raw)
+        l_grid = _quantile_scales(l_raw)
         diam_grid = _quantile_scales(t_raw[:, 0])
         p1_grid = _quantile_scales(t_raw[:, 1])
         b0_grid = _quantile_scales(t_raw[:, 2])
         b1_grid = _quantile_scales(t_raw[:, 3])
 
-        for diam_s in diam_grid:
-            for p1_s in p1_grid:
-                for b0_s in b0_grid:
-                    for b1_s in b1_grid:
-                        topo = _apply_scales(t_raw, (diam_s, p1_s, b0_s, b1_s))
-                        for c_w, l_w, t_w in _weight_candidates(step=0.1):
-                            candidate = np.clip(
-                                c_w * c_raw + l_w * l_raw + t_w * topo,
-                                0.0,
-                                1.5,
-                            )
-                            auc = float(roc_auc_score(y, candidate))
-                            if auc > best_auc:
-                                best_auc = auc
-                                best_weights = (c_w, l_w, t_w)
-                                best_scales = (diam_s, p1_s, b0_s, b1_s)
-                                best_scores = candidate
+        for c_s in c_grid:
+            for l_s in l_grid:
+                for diam_s in diam_grid:
+                    for p1_s in p1_grid:
+                        for b0_s in b0_grid:
+                            for b1_s in b1_grid:
+                                topo = _apply_scales(t_raw, (diam_s, p1_s, b0_s, b1_s))
+                                for c_w, l_w, t_w in _weight_candidates(step=0.1):
+                                    candidate = np.clip(
+                                        _compose_scaled_score(
+                                            c_raw,
+                                            l_raw,
+                                            topo,
+                                            weights=(c_w, l_w, t_w),
+                                            cl_scales=(c_s, l_s),
+                                        ),
+                                        0.0,
+                                        1.5,
+                                    )
+                                    auc = float(roc_auc_score(y, candidate))
+                                    pr_auc = float(average_precision_score(y, candidate))
+                                    cand_std = float(np.std(candidate))
+                                    if _is_better_candidate(
+                                        auc=auc,
+                                        pr_auc=pr_auc,
+                                        score_std=cand_std,
+                                        best_auc=best_auc,
+                                        best_pr_auc=best_pr_auc,
+                                        best_score_std=best_score_std,
+                                    ):
+                                        best_auc = auc
+                                        best_pr_auc = pr_auc
+                                        best_score_std = cand_std
+                                        best_weights = (c_w, l_w, t_w)
+                                        best_scales = (c_s, l_s, diam_s, p1_s, b0_s, b1_s)
+                                        best_scores = candidate
 
     result = summarize_calibration_from_scores(
         scores=best_scores,
@@ -210,10 +289,12 @@ def calibrate_risk_score(
         "topology": best_weights[2],
     }
     result["optimal_scales"] = {
-        "topology_diameter_scale": best_scales[0],
-        "persistence_l1_scale": best_scales[1],
-        "beta0_scale": best_scales[2],
-        "beta1_scale": best_scales[3],
+        "continuity_scale": best_scales[0],
+        "lipschitz_scale": best_scales[1],
+        "topology_diameter_scale": best_scales[2],
+        "persistence_l1_scale": best_scales[3],
+        "beta0_scale": best_scales[4],
+        "beta1_scale": best_scales[5],
     }
     if len(np.unique(y)) >= 2:
         fpr, tpr, roc_th = roc_curve(y, best_scores)
@@ -233,11 +314,47 @@ def calibrate_risk_score(
         "continuity_weight": best_weights[0],
         "lipschitz_weight": best_weights[1],
         "topology_weight": best_weights[2],
-        "topology_diameter_scale": best_scales[0],
-        "persistence_l1_scale": best_scales[1],
-        "beta0_scale": best_scales[2],
-        "beta1_scale": best_scales[3],
+        "continuity_scale": best_scales[0],
+        "lipschitz_scale": best_scales[1],
+        "topology_diameter_scale": best_scales[2],
+        "persistence_l1_scale": best_scales[3],
+        "beta0_scale": best_scales[4],
+        "beta1_scale": best_scales[5],
     }
+    best_topology = _apply_scales(t_raw, best_scales[2:])
+    c_scaled = c_raw / max(best_scales[0], 1e-6)
+    l_scaled = l_raw / max(best_scales[1], 1e-6)
+    result["risk_component_maxima"] = {
+        "continuity_raw_max_per_prompt": c_raw.astype(float).tolist(),
+        "lipschitz_raw_max_per_prompt": l_raw.astype(float).tolist(),
+        "continuity_scaled_max_per_prompt": c_scaled.astype(float).tolist(),
+        "lipschitz_scaled_max_per_prompt": l_scaled.astype(float).tolist(),
+        "topology_scaled_max_per_prompt": best_topology.astype(float).tolist(),
+    }
+    result["risk_component_contributions_at_optimal_weights"] = {
+        "continuity": (best_weights[0] * c_scaled).astype(float).tolist(),
+        "lipschitz": (best_weights[1] * l_scaled).astype(float).tolist(),
+        "topology": (best_weights[2] * best_topology).astype(float).tolist(),
+    }
+    safe_prompts = cfg.safe_prompts or [p for p, y_i in zip(prompts, labels) if int(y_i) == 0]
+    harmful_prompts = cfg.harmful_prompts or [p for p, y_i in zip(prompts, labels) if int(y_i) != 0]
+    if safe_prompts and harmful_prompts:
+        try:
+            vec = compute_contrastive_vector(
+                model=model,
+                tokenizer=tokenizer,
+                safe_prompts=safe_prompts,
+                harmful_prompts=harmful_prompts,
+                layer_idx=cfg.layer_idx,
+                cfg=cfg,
+                device=device,
+            )
+            result["contrastive_vectors"] = {f"layer_{cfg.layer_idx}": vec.astype(float).tolist()}
+        except Exception:
+            # Keep calibration usable even if vector extraction fails for a backend.
+            result["contrastive_vectors"] = {}
+    else:
+        result["contrastive_vectors"] = {}
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, indent=2))

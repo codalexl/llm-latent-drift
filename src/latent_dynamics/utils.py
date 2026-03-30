@@ -195,7 +195,7 @@ def load_activation_bundle(
 
 
 def save_persistence_diagram(diagram: np.ndarray, path: str) -> None:
-    """Save a single persistence diagram to HTML/PNG/SVG outputs.
+    """Export a ripser persistence diagram as appendix-ready Plotly artifacts.
 
     The input must contain shape (n_bars, 2) with columns [birth, death].
     """
