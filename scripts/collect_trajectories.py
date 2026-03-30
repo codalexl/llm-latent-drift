@@ -2,10 +2,10 @@
 """Collect token-level hidden-state trajectories and optionally push to HuggingFace.
 
 Run from repo root with project env (e.g. uv):
-  uv run python scripts/collect_trajectories.py --model gemma3_4b --dataset toy_contrastive --num_samples 20 --output ./activations
+  uv run python scripts/collect_trajectories.py --model gemma3_4b --dataset wildchat --num_samples 20 --output ./activations
 
 Exact CLI from plan:
-  uv run python scripts/collect_trajectories.py --model qwen3_8b --dataset xstest --num_samples 200 --layers 20 --4bit --push_hub alexlyu/llm-traj-safety-qwen3
+  uv run python scripts/collect_trajectories.py --model qwen3_8b --dataset wildchat --num_samples 200 --layers 20 --push_hub alexlyu/llm-traj-safety-qwen3
 """
 
 from __future__ import annotations
@@ -73,13 +73,12 @@ def _parse_args() -> argparse.Namespace:
         choices=list(MODEL_REGISTRY.keys()),
         help="Model key from registry (qwen3_8b, gemma3_4b, gemma3_12b, …).",
     )
-    # Dataset keys currently in DATASET_REGISTRY.
     p.add_argument(
         "--dataset",
         type=str,
-        default="toy_contrastive",
+        default="wildchat",
         choices=list(DATASET_REGISTRY.keys()),
-        help="Dataset key (xstest, wildjailbreak, toy_contrastive).",
+        help="Dataset key: wildchat, wildjailbreak, xstest.",
     )
     p.add_argument(
         "--num_samples",
@@ -93,12 +92,6 @@ def _parse_args() -> argparse.Namespace:
         nargs="+",
         default=None,
         help="Layer indices (e.g. 5 10 20). If not set, use default for model.",
-    )
-    p.add_argument(
-        "--4bit",
-        dest="load_4bit",
-        action="store_true",
-        help="Load model in 4-bit (CUDA only, bitsandbytes).",
     )
     p.add_argument(
         "--push_hub",
@@ -194,10 +187,8 @@ def main() -> None:
     if labels is None:
         labels = np.zeros(n, dtype=np.int64)
 
-    print(f"Loading model {model_key} (4bit={args.load_4bit}) on {device}...")
-    model, tokenizer = load_model_and_tokenizer(
-        model_key, device, load_in_4bit=args.load_4bit
-    )
+    print(f"Loading model {model_key} on {device}...")
+    model, tokenizer = load_model_and_tokenizer(model_key, device)
     print(f"Extracting trajectories for {n} examples, layers {layer_list}...")
     result = extract_multi_layer_trajectories(
         model,

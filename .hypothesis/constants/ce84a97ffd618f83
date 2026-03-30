@@ -1,0 +1,4 @@
+# file: /Users/alexlyu/Projects/llm-latent-drift/src/latent_dynamics/utils.py
+# hypothesis_version: 6.151.10
+
+[0.0, 0.85, 1.0, '.cache/hub', '.html', '.png', '.svg', '/', 'Birth', 'Death', 'Persistence Diagram', '_', '__', 'activations', 'bars', 'birth=death', 'black', 'color', 'darkorange', 'dash', 'dataset_key', 'entries', 'example_idx', 'layer_idx', 'lines', 'markers', 'metadata.json', 'model_key', 'opacity', 'plotly_white', 'shard_file', 'size', 'tensor_key', 'traj_', 'version']

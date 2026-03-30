@@ -23,10 +23,9 @@ pip install -e .
 ```bash
 uv run python scripts/collect_trajectories.py \
   --model qwen3_8b \
-  --dataset xstest \
+  --dataset wildchat \
   --num_samples 200 \
   --layers 24 \
-  --4bit \
   --output ./activations
 ```
 
@@ -50,12 +49,13 @@ uv run latent-dynamics run-driftguard-session \
 ```
 
 ### 4) DriftGuard threat preset benchmark
+Uses a **hybrid suite**: benign sessions from `allenai/WildChat-1M`, unsafe prompts from `allenai/wildjailbreak` (`adversarial_harmful`) prepended with a short synthetic two-turn chat.
+
 ```bash
 uv run python experiments/run_driftguard_benchmark.py \
   --model llama-3.1-8b \
-  --preset multi_turn_jailbreak \
+  --preset wildchat_multi_turn \
   --num-seeds 5 \
-  --quantization-sweep \
   --output-json experiments/outputs/driftguard_benchmark.json
 ```
 
@@ -63,7 +63,7 @@ uv run python experiments/run_driftguard_benchmark.py \
 ```bash
 uv run latent-dynamics calibrate \
   --model-key gemma3_4b \
-  --dataset-key toy_contrastive \
+  --dataset-key wildchat \
   --max-samples 24 \
   --output calibration_results.json
 ```
@@ -73,7 +73,7 @@ This command now performs a label-driven search over risk weights, topology scal
 ```bash
 uv run python experiments/plot_driftguard_benchmark.py \
   --report-json experiments/outputs/driftguard_benchmark.json \
-  --activations activations/toy_contrastive/gemma3_4b/layer_18 \
+  --activations activations/wildchat/gemma3_4b/layer_18 \
   --out-dir experiments/outputs/figures
 ```
 
@@ -101,6 +101,5 @@ uv run python experiments/generate_results_markdown.py \
 ## Notes
 
 - For static PNG export from Plotly, install `kaleido`.
-- 4-bit loading requires CUDA-compatible `bitsandbytes`.
 - Calibration in this repository is fully label-driven.
 

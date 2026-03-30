@@ -1,0 +1,4 @@
+# file: /Users/alexlyu/Projects/llm-latent-drift/src/latent_dynamics/online_runtime.py
+# hypothesis_version: 6.151.10
+
+[0.0, 1e-08, 1e-05, 0.2, 0.8, 1.0, 1.5, 1000.0, 'NNsight', 'PreTrainedModel', '_GpuHiddenRingBuffer', '__call__', 'attention_mask', 'auto', 'beta0', 'beta1', 'cloud_diameter', 'cosine_cont', 'cpu', 'cuda', 'device_map', 'from_pretrained', 'gpt_neox', 'h', 'hf', 'input_ids', 'language_model', 'layers', 'lipschitz', 'logits', 'model', 'mps', 'nnsight', 'persistence_l1', 'pt', 'trace', 'transformer', 'value']

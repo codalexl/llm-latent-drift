@@ -71,6 +71,8 @@ def _plot_lead_time_hist(run: dict, out_path: Path) -> None:
 def _plot_latency_bar(run: dict, out_path: Path) -> None:
     no_steer = run["summary"]["no_steer"]["mean_step_latency_ms"]
     steer = run["summary"]["steer"]["mean_step_latency_ms"]
+    if no_steer is None or steer is None:
+        return
     plt.figure(figsize=(5, 4))
     plt.bar(["no_steer", "steer"], [no_steer, steer], color=["tab:blue", "tab:orange"])
     plt.ylabel("Mean per-token latency (ms)")
@@ -81,48 +83,88 @@ def _plot_latency_bar(run: dict, out_path: Path) -> None:
 
 
 def _plot_ablation_curves(run: dict, out_path: Path) -> None:
-    ablations = run["summary"].get("ablations", {})
-    if not ablations:
-        return
-    fig, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(12, 5))
-    drew_roc = False
-    drew_pr = False
-    for profile, payload in ablations.items():
-        roc = payload.get("roc_curve")
-        auroc = payload.get("detection", {}).get("auroc")
-        label = f"{profile} (AUROC={auroc:.3f})" if auroc is not None else profile
-        if roc:
-            fpr = np.asarray(roc.get("fpr", []), dtype=np.float32)
-            tpr = np.asarray(roc.get("tpr", []), dtype=np.float32)
-            if fpr.size > 0 and tpr.size > 0:
-                ax_roc.plot(fpr, tpr, linewidth=2, label=label)
-                drew_roc = True
-        pr = payload.get("pr_curve")
-        if pr:
-            recall = np.asarray(pr.get("recall", []), dtype=np.float32)
-            precision = np.asarray(pr.get("precision", []), dtype=np.float32)
-            if recall.size > 0 and precision.size > 0:
-                ax_pr.plot(recall, precision, linewidth=2, label=label)
-                drew_pr = True
-    if not drew_roc and not drew_pr:
+    """Plot ablation ROC/PR curves if present, or a baseline AUROC bar chart."""
+    # Legacy format: run["summary"]["ablations"] with ROC/PR curve data.
+    ablations = run.get("summary", {}).get("ablations", {})
+    if ablations:
+        fig, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(12, 5))
+        drew_roc = False
+        drew_pr = False
+        for profile, payload in ablations.items():
+            roc = payload.get("roc_curve")
+            auroc = payload.get("detection", {}).get("auroc")
+            label = f"{profile} (AUROC={auroc:.3f})" if auroc is not None else profile
+            if roc:
+                fpr = np.asarray(roc.get("fpr", []), dtype=np.float32)
+                tpr = np.asarray(roc.get("tpr", []), dtype=np.float32)
+                if fpr.size > 0 and tpr.size > 0:
+                    ax_roc.plot(fpr, tpr, linewidth=2, label=label)
+                    drew_roc = True
+            pr = payload.get("pr_curve")
+            if pr:
+                recall = np.asarray(pr.get("recall", []), dtype=np.float32)
+                precision = np.asarray(pr.get("precision", []), dtype=np.float32)
+                if recall.size > 0 and precision.size > 0:
+                    ax_pr.plot(recall, precision, linewidth=2, label=label)
+                    drew_pr = True
+        if not drew_roc and not drew_pr:
+            plt.close(fig)
+            return
+        if drew_roc:
+            ax_roc.plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
+        ax_roc.set_xlabel("False positive rate")
+        ax_roc.set_ylabel("True positive rate")
+        ax_roc.set_title("Ablation ROC")
+        if drew_roc:
+            ax_roc.legend(fontsize=8)
+        ax_pr.set_xlabel("Recall")
+        ax_pr.set_ylabel("Precision")
+        ax_pr.set_title("Ablation PR")
+        if drew_pr:
+            ax_pr.legend(fontsize=8)
+        fig.suptitle("Risk score ablations: ROC and PR curves")
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=200)
         plt.close(fig)
         return
-    if drew_roc:
-        ax_roc.plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
-    ax_roc.set_xlabel("False positive rate")
-    ax_roc.set_ylabel("True positive rate")
-    ax_roc.set_title("Ablation ROC")
-    if drew_roc:
-        ax_roc.legend(fontsize=8)
-    ax_pr.set_xlabel("Recall")
-    ax_pr.set_ylabel("Precision")
-    ax_pr.set_title("Ablation PR")
-    if drew_pr:
-        ax_pr.legend(fontsize=8)
-    fig.suptitle("Risk score ablations: ROC and PR curves")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
+
+    # New format: run["auroc"] dict with per-baseline AUROC values.
+    auroc = run.get("auroc", {})
+    if not auroc:
+        return
+    names = []
+    values = []
+    for label, key in (
+        ("DriftGuard\n(fused)", "driftguard_fused"),
+        ("Continuity\nonly", "continuity_only"),
+        ("Topology\nonly", "topology_only"),
+        ("Logit-lens", "logit_lens"),
+        ("No monitor", "no_monitor"),
+    ):
+        val = auroc.get(key)
+        if val is not None:
+            names.append(label)
+            values.append(float(val))
+    if not values:
+        return
+    colors = ["tab:blue", "tab:orange", "tab:green", "tab:purple", "tab:gray"]
+    plt.figure(figsize=(7, 4))
+    bars = plt.bar(names, values, color=colors[: len(names)])
+    for bar, val in zip(bars, values):
+        plt.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            bar.get_height() + 0.01,
+            f"{val:.3f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+    plt.ylabel("AUROC")
+    plt.title("Detection ablation: AUROC by risk component")
+    plt.ylim(0, min(max(values) + 0.15, 1.05))
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=200)
+    plt.close()
 
 
 def _plot_pca_paths(activations: Path, out_path: Path) -> None:

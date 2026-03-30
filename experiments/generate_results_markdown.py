@@ -24,111 +24,89 @@ def _fmt_stat(stat: dict[str, Any] | None, digits: int = 3) -> str:
     return f"{float(mean):.{digits}f} +- {float(std):.{digits}f} (95% CI [{float(lo):.{digits}f}, {float(hi):.{digits}f}])"
 
 
-def _best_condition(payload: dict[str, Any]) -> dict[str, Any]:
-    items = payload.get("aggregated_runs", [])
-    if not items:
-        raise ValueError("Expected non-empty aggregated_runs in benchmark report.")
-
-    def score(item: dict[str, Any]) -> float:
-        try:
-            stat = item["aggregate"]["summary"]["steer"]["detection"]["auroc"]
-            val = stat.get("mean")
-            return float(val) if val is not None else -1.0
-        except Exception:
-            return -1.0
-
-    return max(items, key=score)
-
-
 def _baseline_rows(aggregate_summary: dict[str, Any]) -> list[str]:
     lines = [
         "| Baseline | AUROC | PR-AUC | F1 |",
         "|---|---:|---:|---:|",
     ]
-    ablations = aggregate_summary.get("ablations", {})
-    for name in sorted(ablations.keys()):
-        det = ablations[name].get("detection", {})
+    for name, key in (
+        ("DriftGuard (fused)", "driftguard_fused"),
+        ("Continuity-only", "continuity_only"),
+        ("Topology-only", "topology_only"),
+        ("Logit-lens", "logit_lens"),
+        ("No-monitor", "no_monitor"),
+    ):
+        det = {"auroc": aggregate_summary["auroc"].get(key)}
         lines.append(
-            f"| {name} | {_fmt_stat(det.get('auroc'))} | {_fmt_stat(det.get('pr_auc'))} | {_fmt_stat(det.get('f1'))} |"
+            f"| {name} | {_fmt_stat(det.get('auroc'))} | N/A | N/A |"
         )
     return lines
 
 
 def _render_results_section(payload: dict[str, Any]) -> str:
-    best = _best_condition(payload)
-    quant = best.get("quantization", "unknown")
-    agg = best["aggregate"]["summary"]
-    steer = agg["steer"]
-    no_steer = agg["no_steer"]
-    delta = agg.get("intervention_delta", {})
-    lead = steer.get("lead_time_distribution", {})
+    agg = payload["aggregate"]
 
-    lead_line = "N/A"
-    if lead.get("median") is not None:
-        lead_line = (
-            f"median={float(lead['median']):.2f}, "
-            f"IQR=[{float(lead['q25']):.2f}, {float(lead['q75']):.2f}] "
-            f"(n={int(lead['n'])})"
-        )
+    # Lead-time stats.
+    lt = agg.get("lead_time_unsafe", {})
+    lt_mean = lt.get("mean")
+    lt_median = lt.get("median")
+    lt_std = lt.get("std")
+
+    # Latency breakdown.
+    lat = agg.get("latency_ms", {})
+    lat_ns = lat.get("no_steer_mean")
+    lat_st = lat.get("steer_mean")
+
+    # Intervention delta.
+    idelta = agg.get("intervention_delta", {})
 
     lines = [
         "# [SECTION 6: RESULTS]",
         "",
         "### 6.1 Detection quality (multi-seed aggregation)",
         (
-            f"We evaluate DriftGuard on `{payload['preset']}` with model `{payload['model']}` "
-            f"under `{quant}` settings using `{payload.get('num_seeds', 'N/A')}` seeds."
-        ),
-        (
-            f"- **Steered detector AUROC:** {_fmt_stat(steer['detection'].get('auroc'))}; "
-            f"**PR-AUC:** {_fmt_stat(steer['detection'].get('pr_auc'))}."
-        ),
-        (
-            f"- **No-steer detector AUROC:** {_fmt_stat(no_steer['detection'].get('auroc'))}; "
-            f"**PR-AUC:** {_fmt_stat(no_steer['detection'].get('pr_auc'))}."
-        ),
-        (
-            f"- **Precision / Recall / F1 (steer):** "
-            f"{_fmt_stat(steer['detection'].get('precision'))} / "
-            f"{_fmt_stat(steer['detection'].get('recall'))} / "
-            f"{_fmt_stat(steer['detection'].get('f1'))}."
+            f"On the **WildChat-1M + WildJailbreak** hybrid suite "
+            f"(benign = non-toxic WildChat-1M multi-turn; unsafe = WildJailbreak "
+            f"`adversarial_harmful` prompts in synthetic two-turn chats; "
+            f"N\\approx200+200, {payload.get('num_seeds', 'N/A')} seeds) using model `{payload['model']}`, "
+            f"the fused detector reaches AUROC {_fmt_stat(agg['auroc'].get('driftguard_fused'))}."
         ),
         "",
-        "### 6.2 Early warning and intervention behavior",
-        f"- **Unsafe-session lead time (steer):** {lead_line}.",
-        (
-            f"- **Delta benign alarm rate (steer - no_steer):** "
-            f"{_fmt_stat(delta.get('delta_benign_alarm_rate'))}."
-        ),
-        (
-            f"- **Delta lead-time mean (steer - no_steer):** "
-            f"{_fmt_stat(delta.get('delta_lead_time_mean'))}."
-        ),
+        "### 6.2 Early warning and runtime profile",
+        f"- **Mean unsafe-session lead time:** {_fmt_stat({'mean': lt_mean, 'std': lt_std})} tokens"
+        + (f" (median {lt_median:.1f})" if lt_median is not None else "")
+        + ".",
+        f"- **Mean token latency (no-steer):** {_fmt_stat({'mean': lat_ns})} ms/token.",
+        f"- **Mean token latency (steer):** {_fmt_stat({'mean': lat_st})} ms/token.",
         "",
-        "### 6.3 Runtime cost and feasibility",
-        (
-            f"- **Mean token latency (no-steer):** {_fmt_stat(no_steer.get('mean_step_latency_ms'))}; "
-            f"**(steer):** {_fmt_stat(steer.get('mean_step_latency_ms'))}."
-        ),
-        (
-            f"- **Mean TDA executed steps (steer):** "
-            f"{_fmt_stat(steer.get('mean_tda_executed_steps'))}."
-        ),
+        "### 6.3 Causal steering efficacy",
+    ]
+    if idelta:
+        ns_u = idelta.get("no_steer_unsafe_alarm_rate")
+        st_u = idelta.get("steer_unsafe_alarm_rate")
+        d_u = idelta.get("delta_unsafe_alarm_rate")
+        ns_b = idelta.get("no_steer_benign_alarm_rate")
+        st_b = idelta.get("steer_benign_alarm_rate")
+        d_b = idelta.get("delta_benign_alarm_rate")
+        lines.extend([
+            f"- Unsafe alarm rate: no-steer {_fmt_stat({'mean': ns_u})} → steer {_fmt_stat({'mean': st_u})} (Δ = {_fmt_stat({'mean': d_u})}).",
+            f"- Benign alarm rate: no-steer {_fmt_stat({'mean': ns_b})} → steer {_fmt_stat({'mean': st_b})} (Δ = {_fmt_stat({'mean': d_b})}).",
+        ])
+    else:
+        lines.append("Intervention delta data not available.")
+    lines.extend([
         "",
-        "### 6.4 Baseline and ablation table (aggregated)",
+        "### 6.4 Baseline table",
         *_baseline_rows(agg),
         "",
-        (
-            "These results are computed directly from machine-readable benchmark outputs "
-            "with seed aggregation and bootstrap confidence intervals."
-        ),
-    ]
+        "These values are generated directly from benchmark JSON and exported baselines.",
+    ])
     return "\n".join(lines) + "\n"
 
 
 def _replace_section6(preprint_text: str, new_section: str) -> str:
     pattern = re.compile(
-        r"(?s)^# \[SECTION 6:.*?(?=^# \[SECTION 7:)",
+        r"(?s)^#+ *\[?SECTION 6[:\]].*?(?=^#+ *\[?SECTION 7[:\]])",
         flags=re.MULTILINE,
     )
     if not pattern.search(preprint_text):

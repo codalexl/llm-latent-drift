@@ -1,0 +1,4 @@
+# file: /Users/alexlyu/Projects/llm-latent-drift/src/latent_dynamics/calibration.py
+# hypothesis_version: 6.151.10
+
+[-1.0, -1e-09, 0.0, 1e-08, 1e-06, 0.0001, 0.1, 0.15, 0.3, 0.4, 0.5, 0.75, 0.9, 1.0, 1.5, 2.0, 'attention_mask', 'best_threshold', 'beta0_scale', 'beta1_scale', 'continuity', 'continuity_scale', 'continuity_weight', 'contrastive_vectors', 'cpu', 'cv_auc_mean', 'detach', 'fpr', 'input_ids', 'lipschitz', 'lipschitz_scale', 'lipschitz_weight', 'max', 'mean', 'min', 'n_samples', 'optimal_scales', 'optimal_weights', 'overfit_gap', 'persistence_l1_scale', 'pr_auc', 'pr_curve', 'precision', 'pt', 'recall', 'risk_threshold', 'roc_auc', 'roc_curve', 'score_summary', 'std', 'thresholds', 'topology', 'topology_weight', 'tpr', 'weights']

@@ -1,0 +1,4 @@
+# file: /Users/alexlyu/Projects/llm-latent-drift/src/latent_dynamics/config.py
+# hypothesis_version: 6.151.10
+
+[0.0, 1e-06, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.95, 0.96, 1.0, 1.5, 2.0, 3.0, 5.0, 8.0, 50.0, 120, 256, 'DriftGuardConfig', 'Qwen/Qwen3-8B', '^(pca|umap|none)$', 'after', 'allenai/WildChat-1M', 'allow', 'bfloat16', 'conversation', 'dtype', 'float16', 'float32', 'gemma2_27b', 'gemma2_9b', 'gemma3_12b', 'gemma3_270m', 'gemma3_4b', 'google/gemma-2-9b-it', 'google/gemma-3-4b-it', 'hf_id', 'label', 'last', 'llama_3_1_70b', 'llama_3_1_8b', 'mistral_7b_instruct', 'pca', 'probe_weight', 'prompt', 'qwen3_8b', 'redacted', 'tda_stride', 'test', 'topology_stride', 'toxic', 'train', 'unsafe', 'walledai/XSTest', 'wildchat', 'xstest']

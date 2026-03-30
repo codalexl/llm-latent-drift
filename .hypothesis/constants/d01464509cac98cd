@@ -1,0 +1,4 @@
+# file: /Users/alexlyu/Projects/llm-latent-drift/src/latent_dynamics/contrastive_vectors.py
+# hypothesis_version: 6.151.10
+
+[1e-08, 'attention_mask', 'cpu', 'input_ids', 'parameters', 'pt']

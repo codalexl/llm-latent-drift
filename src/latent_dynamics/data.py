@@ -8,7 +8,7 @@ from datasets import (
     load_dataset,
 )
 
-from latent_dynamics.config import DATASET_REGISTRY, TOY_CONTRASTIVE, DatasetSpec
+from latent_dynamics.config import DATASET_REGISTRY, DatasetSpec
 
 STRATIFY_SEED = 42
 
@@ -97,16 +97,16 @@ def load_examples(
 ) -> tuple[Dataset, DatasetSpec]:
     spec = DATASET_REGISTRY[dataset_key]
 
-    if spec.path == "toy_contrastive":
-        ds = Dataset.from_list(TOY_CONTRASTIVE)
-    elif spec.path == "allenai/wildjailbreak":
-        ds = _load_dataset_remote(
-            spec.path,
-            name=spec.split,
-            split="train",
-            delimiter="\t",
-            keep_default_na=False,
-        )
+    if spec.path == "allenai/wildjailbreak":
+        try:
+            ds = _load_dataset_remote(
+                spec.path,
+                split="train",
+                delimiter="\t",
+                keep_default_na=False,
+            )
+        except TypeError:
+            ds = _load_dataset_remote(spec.path, split="train")
     else:
         ds = _load_dataset_remote(spec.path, split=spec.split)
 
@@ -126,6 +126,167 @@ def load_examples(
     return ds, spec
 
 
+_SYNTHETIC_MULTITURN_PREFIXES: tuple[str, ...] = (
+    "User: Hi — can you help me think through something?\n"
+    "Assistant: Sure, what are you working on?\n",
+    "User: Thanks for being here. I need a bit of advice.\n"
+    "Assistant: Happy to help — what’s on your mind?\n",
+    "User: Quick question before we dive in.\n"
+    "Assistant: Of course, go ahead.\n",
+    "User: I’m brainstorming and could use a sounding board.\n"
+    "Assistant: Great — what topic should we focus on?\n",
+)
+
+
+def _wrap_wildjailbreak_adversarial_as_multiturn(
+    adversarial_prompt: str,
+    rng: np.random.Generator,
+) -> str:
+    """Prefix a jailbreak user utterance with a short benign two-turn chat."""
+    prefix = str(rng.choice(list(_SYNTHETIC_MULTITURN_PREFIXES)))
+    body = adversarial_prompt.strip()
+    return prefix + f"User: {body}"
+
+
+def _load_wildjailbreak_adversarial_harmful(
+    rng: np.random.Generator,
+    n: int,
+) -> list[str]:
+    spec = DATASET_REGISTRY["wildjailbreak"]
+    try:
+        wj = _load_dataset_remote(
+            spec.path,
+            split="train",
+            delimiter="\t",
+            keep_default_na=False,
+        )
+    except TypeError:
+        wj = _load_dataset_remote(spec.path, split="train")
+
+    def _row_is_adversarial_harmful(example: dict[str, Any]) -> bool:
+        return (
+            str(example.get("data_type", "")).strip().lower() == "adversarial_harmful"
+        )
+
+    wj_h = wj.filter(_row_is_adversarial_harmful)
+    if len(wj_h) < n:
+        raise ValueError(
+            f"Need {n} adversarial_harmful WildJailbreak rows; only {len(wj_h)} available."
+        )
+    pick = rng.choice(len(wj_h), size=n, replace=False)
+    out: list[str] = []
+    for i in pick.tolist():
+        row = wj_h[int(i)]
+        adv = row.get("adversarial")
+        if adv is None or not str(adv).strip():
+            raise ValueError("WildJailbreak adversarial_harmful row has empty adversarial text.")
+        out.append(_wrap_wildjailbreak_adversarial_as_multiturn(str(adv), rng))
+    return out
+
+
+def _sample_wildchat_non_toxic_sessions(
+    rng: np.random.Generator,
+    n: int,
+    max_scan: int,
+) -> list[str]:
+    """Real multi-turn sessions from public WildChat-1M (non-toxic release)."""
+    wc = _load_dataset_remote("allenai/WildChat-1M", split="train")
+    if len(wc) == 0:
+        raise ValueError("WildChat-1M split is empty.")
+    scan = min(len(wc), max_scan)
+    idx = rng.choice(len(wc), size=scan, replace=False)
+    out: list[str] = []
+    for i in idx.tolist():
+        row = wc[int(i)]
+        if row.get("toxic") is True:
+            continue
+        text = _format_wildchat_1m_session(row.get("conversation") or [])
+        if not text.strip():
+            continue
+        out.append(text)
+        if len(out) >= n:
+            break
+    if len(out) < n:
+        raise ValueError(
+            f"Only collected {len(out)} non-toxic WildChat sessions "
+            f"after scanning {scan} rows (need {n})."
+        )
+    return out
+
+
+def load_hybrid_wildchat_jailbreak_benchmark_sessions(
+    max_cases: int,
+    seed: int,
+) -> tuple[list[str], np.ndarray]:
+    """Benchmark mix: benign = WildChat-1M multi-turn; unsafe = WildJailbreak adversarial harmful in synthetic chat.
+
+    Class 0: real `allenai/WildChat-1M` sessions (non-toxic hub release; rows with ``toxic`` skipped).
+    Class 1: `allenai/wildjailbreak` rows with ``data_type == adversarial_harmful``, adversarial
+    column wrapped with a short benign two-turn preamble. Sessions and labels are shuffled together.
+    """
+    rng = np.random.default_rng(seed)
+    half = max(2, max_cases // 2)
+    pool_scan = max(half * 64, 4096)
+
+    unsafe_texts = _load_wildjailbreak_adversarial_harmful(rng, half)
+    benign_texts = _sample_wildchat_non_toxic_sessions(rng, half, max_scan=pool_scan)
+
+    texts = unsafe_texts + benign_texts
+    labels = np.array([1] * len(unsafe_texts) + [0] * len(benign_texts), dtype=np.int64)
+    perm = rng.permutation(len(texts))
+    return [texts[int(i)] for i in perm.tolist()], labels[perm]
+
+
+def _format_wildchat_1m_session(conversation: list[Any]) -> str:
+    parts: list[str] = []
+    for turn in conversation:
+        if not isinstance(turn, dict):
+            continue
+        role_raw = turn.get("role", "user")
+        role = str(role_raw).strip().lower()
+        content = turn.get("content")
+        text = "" if content is None else str(content).strip()
+        if role == "user":
+            parts.append(f"User: {text}")
+        elif role == "assistant":
+            parts.append(f"Assistant: {text}")
+        else:
+            parts.append(f"{role_raw}: {text}")
+    return "\n".join(parts).strip()
+
+
+def _prepare_wildchat_1m_text_and_labels(
+    ds: Dataset,
+    spec: DatasetSpec,
+    return_metadata: bool = False,
+) -> tuple[list[str], np.ndarray | None, list[dict[str, Any]] | None]:
+    texts: list[str] = []
+    labels: list[int] = []
+    metadata: list[dict[str, Any]] = []
+    for row in ds:
+        conv = row.get("conversation") or []
+        text = _format_wildchat_1m_session(conv)
+        if not text:
+            text = "[empty conversation]"
+        label = _label_from_row(dict(row), spec)
+        if label is None:
+            continue
+        texts.append(text)
+        labels.append(int(label))
+        if return_metadata:
+            metadata.append(
+                {
+                    "conversation_hash": row.get("conversation_hash"),
+                    "toxic": row.get("toxic"),
+                    "redacted": row.get("redacted"),
+                    "turn": row.get("turn"),
+                }
+            )
+    if return_metadata:
+        return texts, np.array(labels, dtype=np.int64), metadata
+    return texts, np.array(labels, dtype=np.int64)
+
+
 def _prepare_wildjailbreak_text_and_labels(
     ds: Dataset,
     spec: DatasetSpec,
@@ -135,33 +296,22 @@ def _prepare_wildjailbreak_text_and_labels(
     labels: list[int] = []
     metadata: list[dict[str, Any]] = []
     for row in ds:
-        input_label = str(row["data_type"]).strip().lower()
-        if input_label == "vanilla_benign":
-            label = 0
-        elif input_label == "vanilla_harmful":
-            label = 1
-        elif input_label == "adversarial_benign":
-            label = 0
-        elif input_label == "adversarial_harmful":
-            label = 1
+        dt = str(row.get("data_type", "")).strip().lower()
+        if "vanilla" in dt:
+            raw = row.get("vanilla")
+        elif "adversarial" in dt:
+            raw = row.get("adversarial")
         else:
-            raise ValueError(f"Unknown label: {input_label}")
-
-        if "vanilla" in input_label:
-            text = row["vanilla"]
-        elif "adversarial" in input_label:
-            text = row["adversarial"]
-        else:
-            raise ValueError(f"Unknown label: {input_label}")
-
-        texts.append(str(text))
-        labels.append(label)
-        metadata.append(
-            {
-                "data_type": row["data_type"],
-                "vanilla_text": row["vanilla"],
-            }
-        )
+            raise ValueError(f"Unknown WildJailbreak data_type: {dt!r}")
+        if raw is None:
+            raise ValueError(f"Empty text for data_type={dt!r}")
+        label = _label_from_row(dict(row), spec)
+        if label is None:
+            continue
+        texts.append(str(raw))
+        labels.append(int(label))
+        if return_metadata:
+            metadata.append({"data_type": row.get("data_type")})
     if return_metadata:
         return texts, np.array(labels, dtype=np.int64), metadata
     return texts, np.array(labels, dtype=np.int64)
@@ -172,6 +322,9 @@ def prepare_text_and_labels(
     spec: DatasetSpec,
     return_metadata: bool = False,
 ) -> tuple[list[str], np.ndarray | None, list[dict[str, Any]] | None]:
+    if spec.path == "allenai/WildChat-1M":
+        return _prepare_wildchat_1m_text_and_labels(ds, spec, return_metadata)
+
     if spec.path == "allenai/wildjailbreak":
         return _prepare_wildjailbreak_text_and_labels(ds, spec, return_metadata)
 
@@ -200,6 +353,6 @@ def prepare_text_and_labels(
 
 
 if __name__ == "__main__":
-    ds, spec = load_examples("wildjailbreak", max_samples=1000, stratify_labels=True)
+    ds, spec = load_examples("wildchat", max_samples=1000, stratify_labels=True)
     texts, labels, metadata = prepare_text_and_labels(ds, spec, return_metadata=True)
     breakpoint()

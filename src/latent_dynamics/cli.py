@@ -30,9 +30,7 @@ class ModelKey(str, Enum):
 
 
 class DatasetKey(str, Enum):
-    toy_contrastive = "toy_contrastive"
-    wildjailbreak = "wildjailbreak"
-    xstest = "xstest"
+    wildchat = "wildchat"
 
 
 @app.command()
@@ -42,7 +40,7 @@ def extract(
     ] = ModelKey.gemma3_4b,
     dataset: Annotated[
         DatasetKey, typer.Option(help="Dataset key from registry.")
-    ] = DatasetKey.toy_contrastive,
+    ] = DatasetKey.wildchat,
     layer: Annotated[
         List[int],
         typer.Option(help="Layer index (repeat for multiple: --layer 5 --layer 10)."),
@@ -80,12 +78,6 @@ def extract(
             help="Include prompt tokens in trajectory when generating.",
         ),
     ] = True,
-    load_4bit: Annotated[
-        bool,
-        typer.Option(
-            "--4bit/--no-4bit", help="Load model in 4-bit (CUDA + bitsandbytes)."
-        ),
-    ] = False,
     use_true_batch_inference: Annotated[
         bool,
         typer.Option(
@@ -184,9 +176,7 @@ def extract(
         )
 
     typer.echo(f"Loaded {len(texts)} examples, loading model...")
-    mdl, tokenizer = load_model_and_tokenizer(
-        cfg.model_key, cfg.device, load_in_4bit=load_4bit
-    )
+    mdl, tokenizer = load_model_and_tokenizer(cfg.model_key, cfg.device)
 
     typer.echo(
         f"Extracting trajectories for layers "
@@ -397,13 +387,6 @@ def run_driftguard_session_cmd(
         int,
         typer.Option(help="Random seed for numpy/torch/python RNGs."),
     ] = 42,
-    load_4bit: Annotated[
-        bool,
-        typer.Option(
-            "--4bit/--no-4bit",
-            help="Load model in 4-bit mode when supported (CUDA only).",
-        ),
-    ] = False,
     safe_reference_prompt: Annotated[
         List[str],
         typer.Option(
@@ -450,11 +433,7 @@ def run_driftguard_session_cmd(
     except Exception:
         pass
 
-    mdl, tokenizer = load_model_and_tokenizer(
-        model.value,
-        resolved_device,
-        load_in_4bit=bool(load_4bit and resolved_device == "cuda"),
-    )
+    mdl, tokenizer = load_model_and_tokenizer(model.value, resolved_device)
     cfg = DriftGuardConfig(
         layer_idx=layer_idx,
         max_new_tokens=max_new_tokens,
@@ -515,7 +494,6 @@ def run_driftguard_session_cmd(
         active_model = load_nnsight_model(
             model_path=hf_id,
             device_map="auto",
-            load_in_4bit=bool(load_4bit and resolved_device == "cuda"),
         )
     result = run_driftguard_session(
         model=active_model,
@@ -584,7 +562,7 @@ def calibrate(
     ] = ModelKey.gemma3_4b,
     dataset_key: Annotated[
         DatasetKey, typer.Option("--dataset-key", help="Dataset key from registry.")
-    ] = DatasetKey.toy_contrastive,
+    ] = DatasetKey.wildchat,
     max_samples: Annotated[
         int, typer.Option(help="Maximum labeled samples for calibration run.")
     ] = 24,
@@ -620,7 +598,7 @@ def calibrate(
     if labels is None:
         raise typer.BadParameter("Selected dataset does not provide labels for calibration.")
     resolved_device = resolve_device(device)
-    mdl, tokenizer = load_model_and_tokenizer(model_key.value, resolved_device, load_in_4bit=False)
+    mdl, tokenizer = load_model_and_tokenizer(model_key.value, resolved_device)
     cfg = DriftGuardConfig(
         model_key=model_key.value,
         dataset_key=dataset_key.value,

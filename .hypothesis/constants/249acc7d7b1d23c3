@@ -1,0 +1,4 @@
+# file: /Users/alexlyu/Projects/llm-latent-drift/src/latent_dynamics/config.py
+# hypothesis_version: 6.151.10
+
+[0.0, 1e-06, 0.2, 0.25, 0.35, 0.4, 0.5, 0.6, 0.95, 0.96, 1.0, 1.5, 2.0, 5.0, 20.0, 24.0, 50.0, 120, 256, 'DriftGuardConfig', 'Qwen/Qwen3-8B', 'adversarial', 'adversarial_benign', 'adversarial_harmful', 'after', 'allow', 'bfloat16', 'data_type', 'dtype', 'float16', 'float32', 'gemma2_27b', 'gemma2_9b', 'gemma3_12b', 'gemma3_270m', 'gemma3_4b', 'google/gemma-2-9b-it', 'google/gemma-3-4b-it', 'hf_id', 'label', 'last', 'llama_3_1_70b', 'llama_3_1_8b', 'mistral_7b_instruct', 'probe_weight', 'prompt', 'qwen3_8b', 'source', 'tda_stride', 'test', 'text', 'topology_stride', 'toy', 'toy_contrastive', 'train', 'unsafe', 'vanilla_benign', 'vanilla_harmful', 'walledai/XSTest', 'wildjailbreak', 'xstest']

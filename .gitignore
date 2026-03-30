@@ -17,5 +17,12 @@ activations/
 figures/
 results/
 models/
-experiments/outputs/
+experiments/outputs/*
+!experiments/outputs/*.json
+!experiments/outputs/*.csv
+!experiments/outputs/*.md
+!experiments/outputs/figures/
+!experiments/outputs/figures/**
+activations/**/*.safetensors
+activations/**/trajectory_shards/**
 *.pkl

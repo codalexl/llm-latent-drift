@@ -1,0 +1,4 @@
+# file: /Users/alexlyu/Projects/llm-latent-drift/src/latent_dynamics/steering.py
+# hypothesis_version: 6.151.10
+
+[0.0, 1e-08, 0.1, 0.25, 1.0, 8.0, 'delta_norm', 'gpt_neox', 'h', 'intervention_mode', 'language_model', 'layers', 'logits', 'model', 'next_token_id', 'safe_reference', 'transformer', 'value']

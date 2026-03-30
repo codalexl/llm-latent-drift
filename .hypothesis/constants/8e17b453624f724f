@@ -1,0 +1,4 @@
+# file: /Users/alexlyu/Projects/llm-latent-drift/src/latent_dynamics/tda_metrics.py
+# hypothesis_version: 6.151.10
+
+[0.0, 1e-06, 0.15, 0.3, 0.4, 1.0, 1.5, 2.0, 'beta0', 'beta1', 'cloud_diameter', 'cosine_cont', 'dgms', 'gudhi', 'lipschitz', 'none', 'persistence_l1', 'ripser']

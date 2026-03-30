@@ -1,1 +1,1 @@
-uv run src/latent_dynamics/cli.py extract --dataset "wildjailbreak" --all-layers --max-samples 10 --use-generate
+uv run src/latent_dynamics/cli.py extract --dataset "wildchat" --all-layers --max-samples 10 --use-generate

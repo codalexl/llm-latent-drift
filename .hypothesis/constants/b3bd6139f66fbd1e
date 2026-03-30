@@ -1,0 +1,4 @@
+# file: /Users/alexlyu/Projects/llm-latent-drift/src/latent_dynamics/models.py
+# hypothesis_version: 6.151.10
+
+['bfloat16', 'cpu', 'cuda', 'cuda:', 'dtype', 'float16', 'float32', 'hf_id', 'mps']

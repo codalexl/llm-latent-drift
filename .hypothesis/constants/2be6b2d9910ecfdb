@@ -1,0 +1,4 @@
+# file: /Users/alexlyu/Projects/llm-latent-drift/src/latent_dynamics/data.py
+# hypothesis_version: 6.151.10
+
+[1000, '[empty conversation]', '__main__', 'allenai/WildChat-1M', 'assistant', 'content', 'conversation', 'conversation_hash', 'redacted', 'role', 'toxic', 'turn', 'user', 'wildchat']

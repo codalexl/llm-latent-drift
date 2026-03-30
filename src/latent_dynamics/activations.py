@@ -393,7 +393,6 @@ def collect_trajectories_nnsight(
     prompts: list[str],
     layer_idx: int,
     device_map: str = "auto",
-    load_in_4bit: bool = False,
 ) -> list[np.ndarray]:
     """
     Collect hidden trajectories with nnsight in one traced forward per prompt.
@@ -410,7 +409,6 @@ def collect_trajectories_nnsight(
     nns_model = load_nnsight_model(
         model_path=model_path,
         device_map=device_map,
-        load_in_4bit=load_in_4bit,
     )
 
     def _layer_stack(model_obj: object) -> object:

@@ -1,0 +1,4 @@
+# file: /Users/alexlyu/Projects/llm-latent-drift/src/latent_dynamics/activations.py
+# hypothesis_version: 6.151.10
+
+['attention_mask', 'auto', 'do_sample', 'eos_token_id', 'get_text_config', 'gpt_neox', 'h', 'input_ids', 'language_model', 'last', 'layers', 'max_new_tokens', 'max_norm', 'mean', 'model', 'pad_token_id', 'pt', 'temperature', 'top_p', 'transformer', 'value']

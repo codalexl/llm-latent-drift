@@ -1,0 +1,4 @@
+# file: /Users/alexlyu/Projects/llm-latent-drift/src/latent_dynamics/_env.py
+# hypothesis_version: 6.151.10
+
+[',', '.cache', '.env', '1', 'HF_HOME', 'HF_HUB_CACHE', 'NO_PROXY', 'TRANSFORMERS_CACHE', 'hub', 'huggingface', 'no_proxy', 'on', 'true', 'yes']

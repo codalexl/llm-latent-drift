@@ -1,0 +1,124 @@
+{
+  "n_samples": 4,
+  "roc_auc": 0.5,
+  "pr_auc": 0.5,
+  "best_threshold": 1.5,
+  "precision_at_best_threshold": 0.5,
+  "recall_at_best_threshold": 1.0,
+  "score_summary": {
+    "min": 1.5,
+    "max": 1.5,
+    "mean": 1.5,
+    "std": 0.0
+  },
+  "weights": {
+    "continuity": 0.4,
+    "lipschitz": 0.35,
+    "topology": 0.25
+  },
+  "optimal_weights": {
+    "continuity": 0.4,
+    "lipschitz": 0.35,
+    "topology": 0.25
+  },
+  "optimal_scales": {
+    "continuity_scale": 1.0,
+    "lipschitz_scale": 1.0,
+    "topology_diameter_scale": 20.0,
+    "persistence_l1_scale": 2.0,
+    "beta0_scale": 24.0,
+    "beta1_scale": 5.0
+  },
+  "roc_curve": {
+    "fpr": [
+      0.0,
+      1.0
+    ],
+    "tpr": [
+      0.0,
+      1.0
+    ],
+    "thresholds": [
+      Infinity,
+      1.5
+    ]
+  },
+  "pr_curve": {
+    "precision": [
+      0.5,
+      1.0
+    ],
+    "recall": [
+      1.0,
+      0.0
+    ],
+    "thresholds": [
+      1.5
+    ]
+  },
+  "recommended_config_update": {
+    "risk_threshold": 1.5,
+    "continuity_weight": 0.4,
+    "lipschitz_weight": 0.35,
+    "topology_weight": 0.25,
+    "continuity_scale": 1.0,
+    "lipschitz_scale": 1.0,
+    "topology_diameter_scale": 20.0,
+    "persistence_l1_scale": 2.0,
+    "beta0_scale": 24.0,
+    "beta1_scale": 5.0
+  },
+  "risk_component_maxima": {
+    "continuity_raw_max_per_prompt": [
+      21.26562499999998,
+      19.721476510067095,
+      21.47767857142855,
+      21.62414383561642
+    ],
+    "lipschitz_raw_max_per_prompt": [
+      22.437499999999996,
+      22.437499999999996,
+      24.156249999999996,
+      23.374999999999996
+    ],
+    "continuity_scaled_max_per_prompt": [
+      21.26562499999998,
+      19.721476510067095,
+      21.47767857142855,
+      21.62414383561642
+    ],
+    "lipschitz_scaled_max_per_prompt": [
+      22.437499999999996,
+      22.437499999999996,
+      24.156249999999996,
+      23.374999999999996
+    ],
+    "topology_scaled_max_per_prompt": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "risk_component_contributions_at_optimal_weights": {
+    "continuity": [
+      8.506249999999993,
+      7.888590604026838,
+      8.591071428571421,
+      8.649657534246568
+    ],
+    "lipschitz": [
+      7.853124999999999,
+      7.853124999999999,
+      8.454687499999999,
+      8.181249999999999
+    ],
+    "topology": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "contrastive_vectors": {}
+}
