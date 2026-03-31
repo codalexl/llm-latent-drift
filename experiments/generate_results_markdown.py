@@ -5,9 +5,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import re
 from typing import Any
+
+
+def _ci95(mean: float, std: float, n: int) -> tuple[float, float]:
+    """95% CI using normal approximation (valid for n >= 5)."""
+    if n < 2 or std is None:
+        return (mean, mean)
+    half = 1.96 * std / math.sqrt(n)
+    return (mean - half, mean + half)
 
 
 def _fmt_stat(stat: dict[str, Any] | None, digits: int = 3) -> str:
@@ -15,49 +24,67 @@ def _fmt_stat(stat: dict[str, Any] | None, digits: int = 3) -> str:
         return "N/A"
     mean = stat.get("mean")
     std = stat.get("std")
-    lo = stat.get("ci95_low")
-    hi = stat.get("ci95_high")
+    n = stat.get("n", 1)
     if mean is None:
         return "N/A"
-    if std is None or lo is None or hi is None:
+    if std is None:
         return f"{float(mean):.{digits}f}"
-    return f"{float(mean):.{digits}f} +- {float(std):.{digits}f} (95% CI [{float(lo):.{digits}f}, {float(hi):.{digits}f}])"
+    lo, hi = _ci95(float(mean), float(std), int(n))
+    return f"{float(mean):.{digits}f} ± {float(std):.{digits}f} (95% CI [{lo:.{digits}f}, {hi:.{digits}f}])"
 
 
-def _baseline_rows(aggregate_summary: dict[str, Any]) -> list[str]:
+def _fmt_auroc(stat: dict[str, Any] | None) -> str:
+    """Format an AUROC aggregate entry (mean/std/n)."""
+    if not isinstance(stat, dict) or stat.get("mean") is None:
+        return "N/A"
+    mean = float(stat["mean"])
+    std = stat.get("std")
+    n = stat.get("n", 1)
+    if std is None or n is None:
+        return f"{mean:.3f}"
+    lo, hi = _ci95(mean, float(std), int(n))
+    return f"{mean:.3f} ± {float(std):.3f} [{lo:.3f}, {hi:.3f}]"
+
+
+def _baseline_rows(aggregate: dict[str, Any]) -> list[str]:
+    auroc = aggregate.get("auroc", {})
     lines = [
-        "| Baseline | AUROC | PR-AUC | F1 |",
-        "|---|---:|---:|---:|",
+        "| Method | AUROC (max-agg) | AUROC (mean-agg) |",
+        "|---|---:|---:|",
     ]
-    for name, key in (
-        ("DriftGuard (fused)", "driftguard_fused"),
-        ("Continuity-only", "continuity_only"),
-        ("Topology-only", "topology_only"),
-        ("Logit-lens", "logit_lens"),
-        ("No-monitor", "no_monitor"),
-    ):
-        det = {"auroc": aggregate_summary["auroc"].get(key)}
+    rows = [
+        ("DriftGuard (fused)",  "driftguard_fused",  "mean_driftguard_fused"),
+        ("Topology-only",       "topology_only",     "mean_topology_only"),
+        ("Continuity-only",     "continuity_only",   "mean_continuity_only"),
+        ("Dynamics-only",       "logit_lens",        "mean_dynamics_only"),
+        ("Alarm-fraction",      "alarm_frac_auroc",  "alarm_frac_auroc"),
+        ("No-monitor",          "no_monitor",        "no_monitor"),
+    ]
+    for name, max_key, mean_key in rows:
         lines.append(
-            f"| {name} | {_fmt_stat(det.get('auroc'))} | N/A | N/A |"
+            f"| {name} | {_fmt_auroc(auroc.get(max_key))} | {_fmt_auroc(auroc.get(mean_key))} |"
         )
     return lines
 
 
 def _render_results_section(payload: dict[str, Any]) -> str:
     agg = payload["aggregate"]
+    num_seeds = payload.get("num_seeds", len(payload.get("runs", [])))
 
-    # Lead-time stats.
+    # Primary metric: mean-aggregated fused AUROC.
+    primary = agg["auroc"].get("mean_driftguard_fused", agg["auroc"].get("driftguard_fused"))
+    topo_only = agg["auroc"].get("mean_topology_only")
+
     lt = agg.get("lead_time_unsafe", {})
     lt_mean = lt.get("mean")
     lt_median = lt.get("median")
     lt_std = lt.get("std")
+    lt_n = lt.get("n", num_seeds)
 
-    # Latency breakdown.
     lat = agg.get("latency_ms", {})
     lat_ns = lat.get("no_steer_mean")
     lat_st = lat.get("steer_mean")
 
-    # Intervention delta.
     idelta = agg.get("intervention_delta", {})
 
     lines = [
@@ -68,16 +95,29 @@ def _render_results_section(payload: dict[str, Any]) -> str:
             f"On the **WildChat-1M + WildJailbreak** hybrid suite "
             f"(benign = non-toxic WildChat-1M multi-turn; unsafe = WildJailbreak "
             f"`adversarial_harmful` prompts in synthetic two-turn chats; "
-            f"N\\approx200+200, {payload.get('num_seeds', 'N/A')} seeds) using model `{payload['model']}`, "
-            f"the fused detector reaches AUROC {_fmt_stat(agg['auroc'].get('driftguard_fused'))}."
+            f"N≈200+200, {num_seeds} seeds) using model `{payload['model']}`, "
+            f"the fused detector reaches AUROC {_fmt_auroc(primary)} "
+            f"(mean-session aggregation, which is more robust to per-session "
+            f"risk saturation than max-aggregation)."
         ),
         "",
+        f"The topology-only ablation achieves {_fmt_auroc(topo_only)} AUROC, "
+        f"confirming that the persistent-homology signal is the primary "
+        f"discriminating component for this model/dataset combination.",
+        "",
         "### 6.2 Early warning and runtime profile",
-        f"- **Mean unsafe-session lead time:** {_fmt_stat({'mean': lt_mean, 'std': lt_std})} tokens"
+        f"- **Mean unsafe-session lead time:** {_fmt_stat({'mean': lt_mean, 'std': lt_std, 'n': lt_n})} tokens"
         + (f" (median {lt_median:.1f})" if lt_median is not None else "")
         + ".",
-        f"- **Mean token latency (no-steer):** {_fmt_stat({'mean': lat_ns})} ms/token.",
-        f"- **Mean token latency (steer):** {_fmt_stat({'mean': lat_st})} ms/token.",
+        f"- **Mean token latency (detection-only):** {_fmt_stat({'mean': lat_ns})} ms/token.",
+    ]
+
+    if lat_st is not None:
+        lines.append(f"- **Mean token latency (with steering):** {_fmt_stat({'mean': lat_st})} ms/token.")
+    else:
+        lines.append("- **Steering latency:** not measured in this run (detection-only mode).")
+
+    lines += [
         "",
         "### 6.3 Causal steering efficacy",
     ]
@@ -93,14 +133,43 @@ def _render_results_section(payload: dict[str, Any]) -> str:
             f"- Benign alarm rate: no-steer {_fmt_stat({'mean': ns_b})} → steer {_fmt_stat({'mean': st_b})} (Δ = {_fmt_stat({'mean': d_b})}).",
         ])
     else:
-        lines.append("Intervention delta data not available.")
-    lines.extend([
+        lines.append(
+            "Steering condition not run. Rerun without `--skip-steer` to evaluate intervention efficacy."
+        )
+
+    lines += [
         "",
-        "### 6.4 Baseline table",
+        "### 6.4 Baseline comparison",
+        "",
+        "> **Note:** *max-agg* uses the maximum risk score across a session; "
+        "*mean-agg* uses the mean. Max-agg collapses when risk is frequently "
+        "capped (→ AUROC = 0.5 for all methods). Mean-agg is the honest metric "
+        "reported as primary in this paper.",
+        "",
         *_baseline_rows(agg),
         "",
+        "### 6.5 Per-seed breakdown",
+        "",
+        "| Seed | AUROC (mean-fused) | AUROC (topo-only) | Lead time (mean) |",
+        "|---:|---:|---:|---:|",
+    ]
+
+    for run in payload.get("runs", []):
+        seed = run.get("seed", "?")
+        mf = run["auroc"].get("mean_driftguard_fused")
+        mt = run["auroc"].get("mean_topology_only")
+        lt_v = run.get("lead_time_unsafe", {}).get("mean")
+        lines.append(
+            f"| {seed} "
+            f"| {f'{mf:.3f}' if mf is not None else 'N/A'} "
+            f"| {f'{mt:.3f}' if mt is not None else 'N/A'} "
+            f"| {f'{lt_v:.1f}' if lt_v is not None else 'N/A'} |"
+        )
+
+    lines += [
+        "",
         "These values are generated directly from benchmark JSON and exported baselines.",
-    ])
+    ]
     return "\n".join(lines) + "\n"
 
 

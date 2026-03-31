@@ -288,9 +288,16 @@ def _compute_step_metrics(
 
     Returns the metrics and the (possibly updated) last_topology snapshot.
     """
+    # Warm-up: suppress geometric metrics for the first N steps.
+    # The prompt→generation boundary causes a structural hidden-state jump
+    # (the last prompt token and first generated token live in very different
+    # representation spaces), which would fire a false alarm on every session
+    # regardless of content. We skip cosine/lipschitz until the trajectory
+    # has had a few steps to stabilize.
+    in_warmup = step_idx < cfg.monitor_warmup_steps
     cos = None
     lip = None
-    if prev_hidden is not None:
+    if prev_hidden is not None and not in_warmup:
         cos = _cosine(hidden, prev_hidden)
         lip = _lipschitz_proxy(hidden, prev_hidden)
 
@@ -568,10 +575,46 @@ def _apply_steering_intervention(
     return result
 
 
-def _next_token_id(logits: torch.Tensor, do_sample: bool, temperature: float) -> int:
+def _apply_repetition_penalty(logits: torch.Tensor, generated_ids: list[int], penalty: float) -> torch.Tensor:
+    """Down-weight logits for tokens that have already appeared in the generated sequence.
+
+    Handles both 1D (vocab_size,) and 2D (1, vocab_size) logit tensors.
+    """
+    if penalty == 1.0 or not generated_ids:
+        return logits
+    squeezed = logits.ndim == 2
+    flat = logits.squeeze(0) if squeezed else logits
+    flat = flat.clone()
+    seen = torch.tensor(list(set(generated_ids)), dtype=torch.long, device=flat.device)
+    # Clamp to valid vocab range — generated_ids could theoretically contain
+    # special token ids outside vocab (shouldn't happen, but be safe).
+    seen = seen[seen < flat.shape[0]]
+    if seen.numel() == 0:
+        return logits
+    score = flat[seen]
+    flat[seen] = torch.where(score > 0, score / penalty, score * penalty)
+    return flat.unsqueeze(0) if squeezed else flat
+
+
+def _next_token_id(
+    logits: torch.Tensor,
+    do_sample: bool,
+    temperature: float,
+    generated_ids: list[int] | None = None,
+    repetition_penalty: float = 1.0,
+) -> int:
+    if generated_ids:
+        logits = _apply_repetition_penalty(logits, generated_ids, repetition_penalty)
     if not do_sample:
         return int(torch.argmax(logits, dim=-1).item())
     probs = torch.softmax(logits / max(temperature, 1e-5), dim=-1)
+    # Guard against NaN/zero probs (can happen on MPS after repetition penalty
+    # reduces many logits toward -inf). Fall back to greedy if probs are invalid.
+    probs = torch.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+    prob_sum = float(probs.sum().item())
+    if prob_sum < 1e-8:
+        return int(torch.argmax(logits, dim=-1).item())
+    probs = probs / prob_sum
     return int(torch.multinomial(probs, num_samples=1).item())
 
 
@@ -643,14 +686,14 @@ def run_driftguard_session(
             contrastive_vectors=contrastive_vectors,
         )
 
-    encoded = tokenizer(
-        prompt,
-        return_tensors="pt",
-        max_length=cfg.max_input_tokens,
-        truncation=True,
-    )
-    full_input_ids = encoded["input_ids"].to(device)
-    full_attention_mask = encoded["attention_mask"].to(device)
+    encoded = tokenizer(prompt, return_tensors="pt")
+    raw_ids = encoded["input_ids"]
+    # Left-truncate: keep the LAST max_input_tokens tokens so the model sees the
+    # most recent turns of the conversation rather than the oldest context.
+    if raw_ids.shape[1] > cfg.max_input_tokens:
+        raw_ids = raw_ids[:, -cfg.max_input_tokens:]
+    full_input_ids = raw_ids.to(device)
+    full_attention_mask = torch.ones_like(full_input_ids)
     input_ids = full_input_ids
     attention_mask = full_attention_mask
 
@@ -702,6 +745,10 @@ def run_driftguard_session(
 
         past_key_values = out.past_key_values
         hidden = out.hidden_states[cfg.layer_idx][:, -1, :].detach()
+        # Sanitize: replace NaN/Inf with zeros so PCA and risk metrics don't corrupt.
+        # MPS can produce non-finite values for truncated / malformed inputs.
+        if not torch.isfinite(hidden).all():
+            hidden = torch.nan_to_num(hidden, nan=0.0, posinf=0.0, neginf=0.0)
         if hidden_history is None:
             hidden_history = _GpuHiddenRingBuffer.create(
                 window=cfg.topology_window,
@@ -746,6 +793,8 @@ def run_driftguard_session(
             logits=logits,
             do_sample=cfg.do_sample,
             temperature=cfg.temperature,
+            generated_ids=generated,
+            repetition_penalty=cfg.repetition_penalty,
         )
         generated.append(token_id)
         latency_ms = (perf_counter() - t0) * 1000.0
@@ -837,14 +886,13 @@ def run_driftguard_session_nnsight(
     forward calls, this function gracefully falls back to `trace(...)`.
     """
     _set_random_seed(cfg.random_seed)
-    encoded = tokenizer(
-        prompt,
-        return_tensors="pt",
-        max_length=cfg.max_input_tokens,
-        truncation=True,
-    )
-    full_input_ids = encoded["input_ids"].to(device)
-    full_attention_mask = encoded["attention_mask"].to(device)
+    encoded = tokenizer(prompt, return_tensors="pt")
+    raw_ids = encoded["input_ids"]
+    # Left-truncate: keep the LAST max_input_tokens tokens.
+    if raw_ids.shape[1] > cfg.max_input_tokens:
+        raw_ids = raw_ids[:, -cfg.max_input_tokens:]
+    full_input_ids = raw_ids.to(device)
+    full_attention_mask = torch.ones_like(full_input_ids)
     input_ids = full_input_ids
     attention_mask = full_attention_mask
     past_key_values = None
@@ -875,6 +923,8 @@ def run_driftguard_session_nnsight(
                 )
             past_key_values = out.past_key_values
             hidden = out.hidden_states[cfg.layer_idx][:, -1, :].detach()
+            if not torch.isfinite(hidden).all():
+                hidden = torch.nan_to_num(hidden, nan=0.0, posinf=0.0, neginf=0.0)
             logits_last = out.logits[:, -1, :].detach()
         except (TypeError, ValueError, NotImplementedError):
             layers = adapter.layer_stack()
@@ -963,6 +1013,8 @@ def run_driftguard_session_nnsight(
             logits=logits_for_sample,
             do_sample=cfg.do_sample,
             temperature=cfg.temperature,
+            generated_ids=generated,
+            repetition_penalty=cfg.repetition_penalty,
         )
         generated.append(token_id)
         latency_ms = (perf_counter() - t0) * 1000.0

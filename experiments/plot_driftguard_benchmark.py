@@ -5,20 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
+import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
-from latent_dynamics.hub import load_activations
-from latent_dynamics.tda_metrics import pca_reduce
-from latent_dynamics.utils import save_persistence_diagram
 
 
 def _ensure_dir(path: Path) -> None:
@@ -29,8 +20,18 @@ def _load_report(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
+def _sessions(run: dict, condition: str = "no_steer") -> list[dict]:
+    """Return sessions for a condition, falling back to no_steer if steer absent."""
+    sess = run.get("sessions", {})
+    if condition in sess and sess[condition]:
+        return sess[condition]
+    return sess.get("no_steer", [])
+
+
 def _plot_cosine_heatmap(run: dict, out_path: Path) -> None:
-    sessions = run["sessions"]["steer"]
+    sessions = _sessions(run, "no_steer")
+    if not sessions:
+        return
     max_len = max((len(s["steps"]) for s in sessions), default=1)
     mat = np.full((len(sessions), max_len), np.nan, dtype=np.float32)
     for i, sess in enumerate(sessions):
@@ -38,205 +39,192 @@ def _plot_cosine_heatmap(run: dict, out_path: Path) -> None:
             cos = step.get("cosine_continuity")
             if cos is not None:
                 mat[i, t] = 1.0 - float(cos)
-    plt.figure(figsize=(10, 4))
-    plt.imshow(mat, aspect="auto", interpolation="nearest")
-    plt.colorbar(label="1 - cosine_continuity")
-    plt.xlabel("Token index")
-    plt.ylabel("Session")
-    plt.title("Cosine drift heatmap (steered sessions)")
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=200)
-    plt.close()
+    fig, ax = plt.subplots(figsize=(10, 4))
+    im = ax.imshow(mat, aspect="auto", interpolation="nearest", vmin=0, vmax=0.5)
+    fig.colorbar(im, ax=ax, label="1 − cosine_continuity")
+    ax.set_xlabel("Token index")
+    ax.set_ylabel("Session")
+    ax.set_title("Cosine drift heatmap (detection-only sessions)")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
 
 
 def _plot_lead_time_hist(run: dict, out_path: Path) -> None:
-    sessions = run["sessions"]["steer"]
+    sessions = _sessions(run, "no_steer")
     vals = [
         float(s["first_alarm_lead_time"])
         for s in sessions
-        if s["unsafe_label"] == 1 and s["first_alarm_lead_time"] is not None
+        if s.get("unsafe_label") == 1 and s.get("first_alarm_lead_time") is not None
     ]
     if not vals:
         return
-    plt.figure(figsize=(6, 4))
-    plt.hist(vals, bins=min(10, len(vals)), color="tab:red", alpha=0.8)
-    plt.xlabel("Lead time (tokens)")
-    plt.ylabel("Count")
-    plt.title("Early-warning lead time on unsafe prompts")
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=200)
-    plt.close()
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.hist(vals, bins=min(20, len(vals)), color="tab:red", alpha=0.8, edgecolor="white")
+    ax.axvline(float(np.median(vals)), color="black", linestyle="--", linewidth=1.5,
+               label=f"Median = {np.median(vals):.0f}")
+    ax.set_xlabel("Lead time (tokens before end of generation)")
+    ax.set_ylabel("Count")
+    ax.set_title("Early-warning lead time distribution (unsafe sessions)")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
 
 
 def _plot_latency_bar(run: dict, out_path: Path) -> None:
-    no_steer = run["summary"]["no_steer"]["mean_step_latency_ms"]
-    steer = run["summary"]["steer"]["mean_step_latency_ms"]
-    if no_steer is None or steer is None:
-        return
-    plt.figure(figsize=(5, 4))
-    plt.bar(["no_steer", "steer"], [no_steer, steer], color=["tab:blue", "tab:orange"])
-    plt.ylabel("Mean per-token latency (ms)")
-    plt.title("Runtime overhead")
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=200)
-    plt.close()
+    summary = run.get("summary", {})
+    no_steer = summary.get("no_steer", {}).get("mean_step_latency_ms")
+    steer_summary = summary.get("steer") or {}
+    steer = steer_summary.get("mean_step_latency_ms") if isinstance(steer_summary, dict) else None
 
-
-def _plot_ablation_curves(run: dict, out_path: Path) -> None:
-    """Plot ablation ROC/PR curves if present, or a baseline AUROC bar chart."""
-    # Legacy format: run["summary"]["ablations"] with ROC/PR curve data.
-    ablations = run.get("summary", {}).get("ablations", {})
-    if ablations:
-        fig, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(12, 5))
-        drew_roc = False
-        drew_pr = False
-        for profile, payload in ablations.items():
-            roc = payload.get("roc_curve")
-            auroc = payload.get("detection", {}).get("auroc")
-            label = f"{profile} (AUROC={auroc:.3f})" if auroc is not None else profile
-            if roc:
-                fpr = np.asarray(roc.get("fpr", []), dtype=np.float32)
-                tpr = np.asarray(roc.get("tpr", []), dtype=np.float32)
-                if fpr.size > 0 and tpr.size > 0:
-                    ax_roc.plot(fpr, tpr, linewidth=2, label=label)
-                    drew_roc = True
-            pr = payload.get("pr_curve")
-            if pr:
-                recall = np.asarray(pr.get("recall", []), dtype=np.float32)
-                precision = np.asarray(pr.get("precision", []), dtype=np.float32)
-                if recall.size > 0 and precision.size > 0:
-                    ax_pr.plot(recall, precision, linewidth=2, label=label)
-                    drew_pr = True
-        if not drew_roc and not drew_pr:
-            plt.close(fig)
-            return
-        if drew_roc:
-            ax_roc.plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1)
-        ax_roc.set_xlabel("False positive rate")
-        ax_roc.set_ylabel("True positive rate")
-        ax_roc.set_title("Ablation ROC")
-        if drew_roc:
-            ax_roc.legend(fontsize=8)
-        ax_pr.set_xlabel("Recall")
-        ax_pr.set_ylabel("Precision")
-        ax_pr.set_title("Ablation PR")
-        if drew_pr:
-            ax_pr.legend(fontsize=8)
-        fig.suptitle("Risk score ablations: ROC and PR curves")
-        fig.tight_layout()
-        fig.savefig(out_path, dpi=200)
-        plt.close(fig)
-        return
-
-    # New format: run["auroc"] dict with per-baseline AUROC values.
-    auroc = run.get("auroc", {})
-    if not auroc:
-        return
-    names = []
-    values = []
-    for label, key in (
-        ("DriftGuard\n(fused)", "driftguard_fused"),
-        ("Continuity\nonly", "continuity_only"),
-        ("Topology\nonly", "topology_only"),
-        ("Logit-lens", "logit_lens"),
-        ("No monitor", "no_monitor"),
-    ):
-        val = auroc.get(key)
-        if val is not None:
-            names.append(label)
-            values.append(float(val))
+    labels, values, colors = [], [], []
+    if no_steer is not None:
+        labels.append("Detection-only")
+        values.append(float(no_steer))
+        colors.append("tab:blue")
+    if steer is not None:
+        labels.append("+ Steering")
+        values.append(float(steer))
+        colors.append("tab:orange")
     if not values:
         return
-    colors = ["tab:blue", "tab:orange", "tab:green", "tab:purple", "tab:gray"]
-    plt.figure(figsize=(7, 4))
-    bars = plt.bar(names, values, color=colors[: len(names)])
+
+    fig, ax = plt.subplots(figsize=(5, 4))
+    bars = ax.bar(labels, values, color=colors)
     for bar, val in zip(bars, values):
-        plt.text(
-            bar.get_x() + bar.get_width() / 2.0,
-            bar.get_height() + 0.01,
-            f"{val:.3f}",
-            ha="center",
-            va="bottom",
-            fontsize=9,
-        )
-    plt.ylabel("AUROC")
-    plt.title("Detection ablation: AUROC by risk component")
-    plt.ylim(0, min(max(values) + 0.15, 1.05))
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=200)
-    plt.close()
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
+                f"{val:.1f} ms", ha="center", va="bottom", fontsize=10)
+    ax.set_ylabel("Mean per-token latency (ms)")
+    ax.set_title("Runtime overhead")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
 
 
-def _plot_pca_paths(activations: Path, out_path: Path) -> None:
-    trajectories, _texts, labels, _tokens, _gen, _cfg = load_activations(activations)
-    if labels is None:
+def _plot_ablation_bar(aggregate: dict, out_path: Path) -> None:
+    """AUROC bar chart with error bars from multi-seed aggregate."""
+    auroc = aggregate.get("auroc", {})
+    if not auroc:
         return
-    safe_idx = int(np.where(labels == 0)[0][0]) if np.any(labels == 0) else 0
-    unsafe_idx = int(np.where(labels == 1)[0][0]) if np.any(labels == 1) else 0
-    safe = trajectories[safe_idx]
-    unsafe = trajectories[unsafe_idx]
-    joint = np.concatenate([safe, unsafe], axis=0)
-    joint_z = pca_reduce(joint, n_components=2)
-    safe_z = joint_z[: safe.shape[0]]
-    unsafe_z = joint_z[safe.shape[0] :]
-    plt.figure(figsize=(6, 5))
-    plt.plot(safe_z[:, 0], safe_z[:, 1], color="tab:green", label="safe", linewidth=2)
-    plt.plot(unsafe_z[:, 0], unsafe_z[:, 1], color="tab:red", label="unsafe", linewidth=2)
-    plt.scatter(safe_z[0, 0], safe_z[0, 1], color="tab:green", s=20)
-    plt.scatter(unsafe_z[0, 0], unsafe_z[0, 1], color="tab:red", s=20)
-    plt.title("PCA latent trajectories (example safe vs unsafe)")
-    plt.xlabel("PC1")
-    plt.ylabel("PC2")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=200)
-    plt.close()
+
+    rows = [
+        ("DriftGuard\n(fused)",  "mean_driftguard_fused"),
+        ("Topology\nonly",       "mean_topology_only"),
+        ("Continuity\nonly",     "mean_continuity_only"),
+        ("Dynamics\nonly",       "mean_dynamics_only"),
+        ("Alarm\nfraction",      "alarm_frac_auroc"),
+        ("No\nmonitor",          "no_monitor"),
+    ]
+    names, means, errs = [], [], []
+    for label, key in rows:
+        stat = auroc.get(key)
+        if not isinstance(stat, dict) or stat.get("mean") is None:
+            continue
+        mean = float(stat["mean"])
+        std = stat.get("std") or 0.0
+        n = stat.get("n") or 1
+        ci_half = 1.96 * float(std) / math.sqrt(max(int(n), 1))
+        names.append(label)
+        means.append(mean)
+        errs.append(ci_half)
+
+    if not names:
+        return
+
+    colors = ["tab:blue", "tab:green", "tab:orange", "tab:purple", "tab:brown", "tab:gray"]
+    fig, ax = plt.subplots(figsize=(8, 4))
+    x = np.arange(len(names))
+    bars = ax.bar(x, means, yerr=errs, capsize=5,
+                  color=colors[:len(names)], alpha=0.85, error_kw={"linewidth": 1.5})
+    ax.axhline(0.5, color="gray", linestyle="--", linewidth=1, label="Chance")
+    for bar, val, err in zip(bars, means, errs):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + err + 0.01,
+                f"{val:.3f}", ha="center", va="bottom", fontsize=8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, fontsize=9)
+    ax.set_ylabel("AUROC (mean-session aggregation)")
+    ax.set_title("Detection ablation — AUROC by risk component (mean ± 95% CI)")
+    ax.set_ylim(0, min(max(means) + max(errs) + 0.15, 1.05))
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
 
 
-def _plot_persistence_diagram(activations: Path, out_path: Path) -> None:
-    trajectories, _texts, labels, _tokens, _gen, _cfg = load_activations(activations)
-    if labels is None or len(trajectories) == 0:
+def _plot_risk_score_distributions(run: dict, out_path: Path) -> None:
+    """Violin/box plot of mean session risk by label."""
+    sessions = _sessions(run, "no_steer")
+    benign, unsafe = [], []
+    for s in sessions:
+        steps = s.get("steps", [])
+        risks = [st["risk_score"] for st in steps if st.get("risk_score") is not None]
+        if not risks:
+            continue
+        mean_r = float(np.mean(risks))
+        if s.get("unsafe_label") == 1:
+            unsafe.append(mean_r)
+        else:
+            benign.append(mean_r)
+    if not benign or not unsafe:
         return
-    idx = int(np.where(labels == 1)[0][0]) if np.any(labels == 1) else 0
-    points = pca_reduce(trajectories[idx], n_components=8)
-    try:
-        from ripser import ripser
-    except Exception:
+
+    fig, ax = plt.subplots(figsize=(5, 4))
+    parts = ax.violinplot([benign, unsafe], positions=[0, 1], showmedians=True)
+    for pc in parts["bodies"]:
+        pc.set_alpha(0.7)
+    parts["bodies"][0].set_facecolor("tab:blue")
+    parts["bodies"][1].set_facecolor("tab:red")
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["Benign", "Unsafe"])
+    ax.set_ylabel("Mean session risk score")
+    ax.set_title("Risk score distribution by label")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+def _plot_per_seed_auroc(payload: dict, out_path: Path) -> None:
+    """Line plot of mean-fused and topo-only AUROC across seeds."""
+    runs = payload.get("runs", [])
+    if len(runs) < 2:
         return
-    dgms = ripser(points, maxdim=1).get("dgms", [])
-    if len(dgms) < 2:
-        return
-    d1 = dgms[1]
-    if d1.size == 0:
-        return
-    save_persistence_diagram(d1, str(out_path))
+    seeds = [r["seed"] for r in runs]
+    fused = [r["auroc"].get("mean_driftguard_fused") for r in runs]
+    topo  = [r["auroc"].get("mean_topology_only") for r in runs]
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(seeds, fused, marker="o", label="DriftGuard (fused)", color="tab:blue")
+    ax.plot(seeds, topo,  marker="s", label="Topology-only",      color="tab:green")
+    ax.axhline(0.5, color="gray", linestyle="--", linewidth=1, label="Chance")
+    ax.set_xlabel("Seed")
+    ax.set_ylabel("AUROC (mean-session)")
+    ax.set_title("Per-seed AUROC stability")
+    ax.legend()
+    ax.set_ylim(0, 1.05)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot figures from DriftGuard benchmark report.")
     parser.add_argument("--report-json", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, default=Path("experiments/outputs/figures"))
-    parser.add_argument(
-        "--activations",
-        type=Path,
-        default=None,
-        help="Optional activations leaf for PCA path and persistence figures.",
-    )
     args = parser.parse_args()
 
     report = _load_report(args.report_json)
     _ensure_dir(args.out_dir)
     run = report["runs"][0]
-    _plot_cosine_heatmap(run, args.out_dir / "driftguard_cosine_heatmap.png")
-    _plot_lead_time_hist(run, args.out_dir / "driftguard_lead_time_hist.png")
-    _plot_latency_bar(run, args.out_dir / "driftguard_latency_bar.png")
-    _plot_ablation_curves(run, args.out_dir / "driftguard_ablation_roc.png")
-    if args.activations is not None:
-        _plot_pca_paths(args.activations, args.out_dir / "driftguard_pca_paths.png")
-        _plot_persistence_diagram(
-            args.activations,
-            args.out_dir / "driftguard_persistence_diagram.png",
-        )
+    agg = report.get("aggregate", {})
+
+    _plot_cosine_heatmap(run,    args.out_dir / "driftguard_cosine_heatmap.png")
+    _plot_lead_time_hist(run,    args.out_dir / "driftguard_lead_time_hist.png")
+    _plot_latency_bar(run,       args.out_dir / "driftguard_latency_bar.png")
+    _plot_ablation_bar(agg,      args.out_dir / "driftguard_ablation_auroc.png")
+    _plot_risk_score_distributions(run, args.out_dir / "driftguard_risk_distributions.png")
+    _plot_per_seed_auroc(report, args.out_dir / "driftguard_per_seed_auroc.png")
+
     print(f"Wrote figures to {args.out_dir}")
 
 

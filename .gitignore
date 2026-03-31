@@ -26,3 +26,6 @@ experiments/outputs/*
 activations/**/*.safetensors
 activations/**/trajectory_shards/**
 *.pkl
+
+# >100MB; cannot push to GitHub without LFS
+experiments/outputs/driftguard_proper_gemma3_4b.json

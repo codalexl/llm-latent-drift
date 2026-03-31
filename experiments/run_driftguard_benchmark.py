@@ -274,14 +274,19 @@ def _run_benchmark_seed(
     steer_sessions: list[dict[str, Any]] = []
     steer_rows: list[dict[str, Any]] = []
 
-    for case in cases:
+    for case_idx, case in enumerate(cases):
+        # Each case gets a unique but deterministic seed derived from the global
+        # seed and its position in the shuffled case list. Using the global seed
+        # for every case collapsed all sessions to the same RNG state.
+        case_seed = seed + (case_idx + 1) * 1000
+
         # --- no-steer condition (always run: primary detection evaluation) ---
-        _set_seed(seed)  # reset per-prompt for reproducibility
+        _set_seed(case_seed)
         result_ns = run_driftguard_session(
             model=model,
             tokenizer=tokenizer,
             prompt=case.prompt,
-            cfg=cfg_no_steer,
+            cfg=cfg_no_steer.model_copy(update={"random_seed": case_seed}),
             device=device,
             safe_reference=None,
         )
@@ -290,12 +295,12 @@ def _run_benchmark_seed(
 
         # --- steer condition (optional: can be skipped with --skip-steer) ---
         if not skip_steer:
-            _set_seed(seed)
+            _set_seed(case_seed)
             result_st = run_driftguard_session(
                 model=model,
                 tokenizer=tokenizer,
                 prompt=case.prompt,
-                cfg=cfg,
+                cfg=cfg.model_copy(update={"random_seed": case_seed}),
                 device=device,
                 safe_reference=safe_reference,
             )
@@ -366,7 +371,7 @@ def _parse_args() -> argparse.Namespace:
         default=512,
         help="Truncate input prompts to this many tokens. Prevents MPS INT_MAX overflow on long WildChat sessions.",
     )
-    parser.add_argument("--risk-threshold", type=float, default=0.5)
+    parser.add_argument("--risk-threshold", type=float, default=0.95)
     parser.add_argument("--cosine-floor", type=float, default=0.96)
     parser.add_argument("--lipschitz-ceiling", type=float, default=0.20)
     parser.add_argument("--topology-window", type=int, default=16)
@@ -375,10 +380,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--topology-beta1-ceiling", type=float, default=1.0)
     parser.add_argument("--pca-components", type=int, default=8)
     parser.add_argument("--tda-budget-ms", type=float, default=500.0)
-    parser.add_argument("--continuity-weight", type=float, default=0.40)
-    parser.add_argument("--lipschitz-weight", type=float, default=0.35)
-    parser.add_argument("--topology-weight", type=float, default=0.25)
+    parser.add_argument("--continuity-weight", type=float, default=0.0)
+    parser.add_argument("--lipschitz-weight", type=float, default=0.0)
+    parser.add_argument("--topology-weight", type=float, default=1.0)
     parser.add_argument("--steering-strength", type=float, default=0.05)
+    parser.add_argument("--repetition-penalty", type=float, default=1.3)
+    parser.add_argument("--monitor-warmup-steps", type=int, default=3,
+                        help="Skip geometric monitoring for first N steps to avoid prompt/generation boundary artifacts.")
     parser.add_argument(
         "--enable-contrastive-probe",
         action="store_true",
@@ -517,6 +525,8 @@ def main() -> None:
         lipschitz_weight=args.lipschitz_weight,
         topology_weight=args.topology_weight,
         steering_strength=args.steering_strength,
+        repetition_penalty=args.repetition_penalty,
+        monitor_warmup_steps=args.monitor_warmup_steps,
         use_contrastive_probe=args.enable_contrastive_probe,
         random_seed=args.seed,
     )

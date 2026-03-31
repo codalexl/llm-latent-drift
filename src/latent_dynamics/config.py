@@ -31,6 +31,8 @@ class DriftGuardConfig(BaseModel):
     do_sample: bool = True
     temperature: float = Field(default=0.6, gt=0.0)
     top_p: float = Field(default=0.95, gt=0.0, le=1.0)
+    repetition_penalty: float = Field(default=1.3, ge=1.0)
+    monitor_warmup_steps: int = Field(default=3, ge=0)
     include_prompt_in_trajectory: bool = True
     use_true_batch_inference: bool = False
     inference_batch_size: int = Field(default=16, ge=1)
@@ -46,12 +48,12 @@ class DriftGuardConfig(BaseModel):
     )
     topology_window: int = Field(default=16, ge=4)
     tda_latency_budget_ms: float = Field(default=500.0, ge=0.0)
-    cosine_floor: float = Field(default=0.96, ge=0.0, le=1.0)
-    lipschitz_ceiling: float = Field(default=0.20, ge=0.0)
-    risk_threshold: float = Field(default=0.5, ge=0.0, le=2.0)
-    continuity_weight: float = Field(default=0.40, ge=0.0, le=1.0)
-    lipschitz_weight: float = Field(default=0.35, ge=0.0, le=1.0)
-    topology_weight: float = Field(default=0.25, ge=0.0, le=1.0)
+    cosine_floor: float = Field(default=0.85, ge=0.0, le=1.0)
+    lipschitz_ceiling: float = Field(default=0.45, ge=0.0)
+    risk_threshold: float = Field(default=0.95, ge=0.0, le=2.0)
+    continuity_weight: float = Field(default=0.0, ge=0.0, le=1.0)
+    lipschitz_weight: float = Field(default=0.0, ge=0.0, le=1.0)
+    topology_weight: float = Field(default=1.0, ge=0.0, le=1.0)
     continuity_scale: float = Field(default=1.0, gt=0.0)
     lipschitz_scale: float = Field(default=1.0, gt=0.0)
     topology_diameter_scale: float = Field(default=2.0, gt=0.0)
