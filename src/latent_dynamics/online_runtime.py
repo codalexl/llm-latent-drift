@@ -643,7 +643,12 @@ def run_driftguard_session(
             contrastive_vectors=contrastive_vectors,
         )
 
-    encoded = tokenizer(prompt, return_tensors="pt")
+    encoded = tokenizer(
+        prompt,
+        return_tensors="pt",
+        max_length=cfg.max_input_tokens,
+        truncation=True,
+    )
     full_input_ids = encoded["input_ids"].to(device)
     full_attention_mask = encoded["attention_mask"].to(device)
     input_ids = full_input_ids
@@ -832,7 +837,12 @@ def run_driftguard_session_nnsight(
     forward calls, this function gracefully falls back to `trace(...)`.
     """
     _set_random_seed(cfg.random_seed)
-    encoded = tokenizer(prompt, return_tensors="pt")
+    encoded = tokenizer(
+        prompt,
+        return_tensors="pt",
+        max_length=cfg.max_input_tokens,
+        truncation=True,
+    )
     full_input_ids = encoded["input_ids"].to(device)
     full_attention_mask = encoded["attention_mask"].to(device)
     input_ids = full_input_ids

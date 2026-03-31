@@ -16,7 +16,7 @@ class DriftGuardConfig(BaseModel):
     model_key: str = "gemma3_4b"
     dataset_key: str = "wildchat"
     max_samples: int = Field(default=120, ge=1)
-    max_input_tokens: int = Field(default=256, ge=1)
+    max_input_tokens: int = Field(default=512, ge=1)
     layer_idx: int = 5
     pooling: str = "last"  # last | mean | max_norm
     direction_method: str = "probe_weight"  # probe_weight | mean_diff | pca
@@ -36,16 +36,16 @@ class DriftGuardConfig(BaseModel):
     inference_batch_size: int = Field(default=16, ge=1)
 
     # Drift runtime / risk config.
-    pca_components: int = Field(default=3, ge=1, le=64)
+    pca_components: int = Field(default=8, ge=1, le=64)
     reduction_method: str = Field(default="pca", pattern="^(pca|umap|none)$")
     tda_enabled: bool = True
     topology_stride: int = Field(
-        default=4,
+        default=2,
         ge=1,
         validation_alias=AliasChoices("topology_stride", "tda_stride"),
     )
-    topology_window: int = Field(default=8, ge=4)
-    tda_latency_budget_ms: float = Field(default=50.0, ge=0.0)
+    topology_window: int = Field(default=16, ge=4)
+    tda_latency_budget_ms: float = Field(default=500.0, ge=0.0)
     cosine_floor: float = Field(default=0.96, ge=0.0, le=1.0)
     lipschitz_ceiling: float = Field(default=0.20, ge=0.0)
     risk_threshold: float = Field(default=0.5, ge=0.0, le=2.0)
@@ -67,10 +67,10 @@ class DriftGuardConfig(BaseModel):
     topology_beta1_weight: float = Field(default=0.15, ge=0.0, le=1.0)
     probe_weight: float = Field(default=0.60, ge=0.0, le=1.0)
     contrastive_steering_strength: float = Field(default=0.25, ge=0.0, le=1.0)
-    use_contrastive_probe: bool = True
+    use_contrastive_probe: bool = False
     safe_prompts: list[str] = Field(default_factory=list)
     harmful_prompts: list[str] = Field(default_factory=list)
-    steering_strength: float = Field(default=0.20, ge=0.0, le=1.0)
+    steering_strength: float = Field(default=0.05, ge=0.0, le=1.0)
     use_nnsight: bool = False
     nnsight_full_prefix_trace: bool = True
     nnsight_fail_open: bool = True

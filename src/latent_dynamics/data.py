@@ -28,6 +28,23 @@ def _load_dataset_remote(*args: object, **kwargs: object) -> Any:
         raise RuntimeError(f"{_HF_FETCH_HINT}\nCaused by: {e!r}") from e
 
 
+def _load_wildjailbreak_split(split: str = "train") -> Any:
+    """Load WildJailbreak robustly across hub dataset layout changes."""
+    try:
+        return _load_dataset_remote(
+            "allenai/wildjailbreak",
+            data_files={split: f"{split}/{split}.tsv"},
+            split=split,
+            delimiter="\t",
+            keep_default_na=False,
+        )
+    except RuntimeError as e:
+        # Backward-compat fallback for older datasets API behavior.
+        if "data_files=None" not in str(e):
+            raise
+        return _load_dataset_remote("allenai/wildjailbreak", split=split)
+
+
 def _label_from_row(row: dict[str, Any], spec: DatasetSpec) -> int | None:
     if spec.label_field is not None:
         return int(row[spec.label_field])
@@ -98,15 +115,7 @@ def load_examples(
     spec = DATASET_REGISTRY[dataset_key]
 
     if spec.path == "allenai/wildjailbreak":
-        try:
-            ds = _load_dataset_remote(
-                spec.path,
-                split="train",
-                delimiter="\t",
-                keep_default_na=False,
-            )
-        except TypeError:
-            ds = _load_dataset_remote(spec.path, split="train")
+        ds = _load_wildjailbreak_split(split="train")
     else:
         ds = _load_dataset_remote(spec.path, split=spec.split)
 
@@ -153,15 +162,7 @@ def _load_wildjailbreak_adversarial_harmful(
     n: int,
 ) -> list[str]:
     spec = DATASET_REGISTRY["wildjailbreak"]
-    try:
-        wj = _load_dataset_remote(
-            spec.path,
-            split="train",
-            delimiter="\t",
-            keep_default_na=False,
-        )
-    except TypeError:
-        wj = _load_dataset_remote(spec.path, split="train")
+    wj = _load_wildjailbreak_split(split="train")
 
     def _row_is_adversarial_harmful(example: dict[str, Any]) -> bool:
         return (
