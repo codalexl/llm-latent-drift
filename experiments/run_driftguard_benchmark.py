@@ -300,7 +300,7 @@ def _run_benchmark_seed(
                 model=model,
                 tokenizer=tokenizer,
                 prompt=case.prompt,
-                cfg=cfg.model_copy(update={"random_seed": case_seed}),
+                cfg=cfg.model_copy(update={"random_seed": case_seed, "enable_steering": True}),
                 device=device,
                 safe_reference=safe_reference,
             )

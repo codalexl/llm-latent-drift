@@ -19,7 +19,6 @@ from latent_dynamics.data import load_examples, prepare_text_and_labels
 from latent_dynamics.hub import activation_subpath, load_activations, pull_from_hub, push_to_hub, save_activations
 from latent_dynamics.models import load_model_and_tokenizer, resolve_device
 from latent_dynamics.online_runtime import estimate_safe_reference, load_nnsight_model, run_driftguard_session, run_driftguard_session_nnsight
-from latent_dynamics.steering import apply_contrastive_steering, steer_toward_reference, steer_with_nnsight
 from latent_dynamics.tda_metrics import TopologySnapshot, topology_snapshot
 
 __all__ = [
@@ -49,8 +48,5 @@ __all__ = [
     "run_driftguard_session",
     "run_driftguard_session_nnsight",
     "save_activations",
-    "apply_contrastive_steering",
-    "steer_toward_reference",
-    "steer_with_nnsight",
     "topology_snapshot",
 ]

@@ -1,3 +1,13 @@
+"""Causal activation steering interventions.
+
+Future Work: This module is preserved for planned v2 development but is not
+active in the default DriftGuard pipeline. Steering is disabled by default
+in DriftGuardConfig (enable_steering=False). See the archive/full-steering-integration
+branch for the fully-integrated version.
+
+To re-enable: set enable_steering=True in DriftGuardConfig or pass
+--enable-steering to the CLI.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass

@@ -24,10 +24,7 @@ if str(SRC) not in sys.path:
 
 from latent_dynamics.config import DriftGuardConfig, MODEL_REGISTRY, DEFAULT_LAYERS
 from latent_dynamics.models import load_model_and_tokenizer, resolve_device
-from latent_dynamics.online_runtime import (
-    estimate_safe_reference,
-    run_driftguard_session,
-)
+from latent_dynamics.online_runtime import run_driftguard_session
 from latent_dynamics.tda_metrics import (
     persistence_summary,
     pca_reduce,
@@ -35,10 +32,6 @@ from latent_dynamics.tda_metrics import (
     topology_snapshot,
 )
 
-SAFE_PROMPTS = [
-    "Explain responsible vulnerability disclosure practices.",
-    "How do AI safety filters reduce harmful model behavior?",
-]
 DIAG_PROMPTS = [
     {
         "prompt": (
@@ -121,14 +114,6 @@ def _run_session_diagnostic(
     print(f"Loading {model_key} on {device} ...")
     model, tokenizer = load_model_and_tokenizer(model_key, device)
 
-    safe_ref = estimate_safe_reference(
-        model=model,
-        tokenizer=tokenizer,
-        prompts=SAFE_PROMPTS,
-        device=device,
-        layer_idx=layer_idx,
-    )
-
     sessions = []
     for case in DIAG_PROMPTS:
         print(f"  Running: {case['tag']} ...")
@@ -139,7 +124,6 @@ def _run_session_diagnostic(
             prompt=case["prompt"],
             cfg=cfg,
             device=device,
-            safe_reference=safe_ref,
         )
         wall_ms = (perf_counter() - t0) * 1000
 

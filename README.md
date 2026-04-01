@@ -1,6 +1,6 @@
 # latent-dynamics
 
-Inference-time DriftGuard research code for hidden-state drift detection and causal activation steering on fixed LLMs.
+Inference-time DriftGuard: latent hidden-state drift detection, TDA-based risk scoring, online monitoring, and calibration for fixed LLMs.
 
 ## Setup
 
@@ -42,10 +42,7 @@ uv run python scripts/visualize_trajectories.py \
 uv run latent-dynamics run-driftguard-session \
   --model llama_3_1_8b \
   --prompt "Let's discuss responsible cybersecurity disclosure." \
-  --safe-reference-prompt "How do safety policies reduce misuse?" \
-  --safe-reference-prompt "Give safe guidance for lab procedures." \
-  --risk-threshold 0.5 \
-  --use-nnsight
+  --risk-threshold 0.5
 ```
 
 ### 4) DriftGuard threat preset benchmark
@@ -97,6 +94,12 @@ uv run python experiments/generate_results_markdown.py \
 
 - `--seed` is exposed on extraction and benchmark scripts.
 - Benchmark presets are fixed and version-controlled for repeatability.
+
+## Future Work
+
+Causal activation steering (applying hidden-state interventions toward a safe reference at alarm time) is planned as a v2 extension. The code is preserved in `src/latent_dynamics/steering.py` and can be re-enabled with `--enable-steering` on the CLI or `enable_steering=True` in `DriftGuardConfig`. The full integrated version is archived on the `archive/full-steering-integration` branch.
+
+The current focus is robust latent drift detection, TDA-based risk scoring, online monitoring, and calibration.
 
 ## Notes
 

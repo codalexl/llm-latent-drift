@@ -1,7 +1,7 @@
 method,auroc_mean,auroc_std,auroc_mean_agg,auroc_mean_agg_std
-DriftGuard (fused),0.6,0.0,0.79,0.0
-Continuity-only,0.33999999999999997,0.0,0.29,0.0
-Topology-only,0.575,0.0,0.81,0.0
-Dynamics-only,0.6,0.0,0.79,0.0
+DriftGuard (fused),0.45874999999999994,0.0,0.435,0.0
+Continuity-only,0.625,0.0,0.7975,0.0
+Topology-only,0.47000000000000003,0.0,0.43250000000000005,0.0
+Dynamics-only,0.45874999999999994,0.0,0.435,0.0
 Alarm-fraction,0.5,0.0,0.5,0.0
 No-monitor,0.5,0.0,0.5,0.0

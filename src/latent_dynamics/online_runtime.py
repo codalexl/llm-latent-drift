@@ -773,7 +773,8 @@ def run_driftguard_session(
         steered = False
         steering_delta_norm = None
         cache_reset_needed = False
-        if m.alarm and (contrastive_vector is not None or safe_reference is not None):
+        # Future Work: steering intervention gated behind enable_steering flag.
+        if cfg.enable_steering and m.alarm and (contrastive_vector is not None or safe_reference is not None):
             steering_out = _apply_steering_intervention(
                 backend="hf",
                 cfg=cfg,
@@ -820,10 +821,9 @@ def run_driftguard_session(
         if cache_reset_needed:
             past_key_values = None
             input_ids = full_input_ids
-            attention_mask = full_attention_mask
         else:
             input_ids = new_token
-            attention_mask = torch.ones_like(new_token, device=device)
+        attention_mask = full_attention_mask
 
     result = _summarize_session(generated, steps, tokenizer, tda_state)
     if cfg.clear_cache_after_steer and any(step.steered for step in steps):
@@ -980,7 +980,8 @@ def run_driftguard_session_nnsight(
         steering_delta_norm = None
         cache_reset_needed = False
         logits_for_sample = logits_last
-        if m.alarm and (contrastive_vector is not None or safe_reference is not None):
+        # Future Work: steering intervention gated behind enable_steering flag.
+        if cfg.enable_steering and m.alarm and (contrastive_vector is not None or safe_reference is not None):
             # Prefer in-pass hidden-space steering to avoid an extra nnsight trace.
             if hasattr(nns_model, "get_output_embeddings"):
                 steering_out = _steer_logits_hf(
@@ -1038,8 +1039,7 @@ def run_driftguard_session_nnsight(
         if cache_reset_needed or past_key_values is None:
             past_key_values = None
             input_ids = full_input_ids
-            attention_mask = full_attention_mask
         else:
             input_ids = new_token
-            attention_mask = torch.ones_like(new_token, device=device)
+        attention_mask = full_attention_mask
     return _summarize_session(generated, steps, tokenizer, tda_state)

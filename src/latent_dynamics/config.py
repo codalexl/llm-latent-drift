@@ -73,6 +73,9 @@ class DriftGuardConfig(BaseModel):
     safe_prompts: list[str] = Field(default_factory=list)
     harmful_prompts: list[str] = Field(default_factory=list)
     steering_strength: float = Field(default=0.05, ge=0.0, le=1.0)
+    # Future Work: causal activation steering is disabled by default.
+    # Enable with enable_steering=True to activate intervention logic.
+    enable_steering: bool = False
     use_nnsight: bool = False
     nnsight_full_prefix_trace: bool = True
     nnsight_fail_open: bool = True

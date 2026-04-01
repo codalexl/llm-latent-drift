@@ -343,6 +343,16 @@ def run_driftguard_session_cmd(
     probe_weight: Annotated[
         float, typer.Option(help="Weight for contrastive probe in hybrid risk.")
     ] = 0.60,
+    enable_steering: Annotated[
+        bool,
+        typer.Option(
+            "--enable-steering/--no-enable-steering",
+            help=(
+                "Enable causal activation steering interventions on alarm. "
+                "Disabled by default; planned as a future work extension."
+            ),
+        ),
+    ] = False,
     steering_strength: Annotated[
         float, typer.Option(help="Intervention strength toward safe reference.")
     ] = 0.20,
@@ -411,7 +421,7 @@ def run_driftguard_session_cmd(
         typer.Option(help="Optional output JSON path for per-step drift logs."),
     ] = None,
 ) -> None:
-    """Run a single online session with early-warning + activation steering."""
+    """Run a single online session with real-time latent drift detection and early-warning alarms."""
     from latent_dynamics.models import load_model_and_tokenizer, resolve_device
     from latent_dynamics.contrastive_vectors import compute_contrastive_vector
     from latent_dynamics.online_runtime import (
@@ -452,6 +462,7 @@ def run_driftguard_session_cmd(
         lipschitz_weight=lipschitz_weight,
         topology_weight=topology_weight,
         probe_weight=probe_weight,
+        enable_steering=enable_steering,
         steering_strength=steering_strength,
         contrastive_steering_strength=contrastive_steering_strength,
         use_contrastive_probe=use_contrastive_probe,
