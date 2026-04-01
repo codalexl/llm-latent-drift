@@ -381,6 +381,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--pca-components", type=int, default=8)
     parser.add_argument("--tda-budget-ms", type=float, default=500.0)
     parser.add_argument("--continuity-weight", type=float, default=0.0)
+    parser.add_argument("--continuity-scale", type=float, default=1.0,
+                        help="Divisor applied to raw continuity risk before fusion. "
+                             "Raise to bring continuity_risk into the [0,1.5] cap range.")
     parser.add_argument("--lipschitz-weight", type=float, default=0.0)
     parser.add_argument("--topology-weight", type=float, default=1.0)
     parser.add_argument("--steering-strength", type=float, default=0.05)
@@ -522,6 +525,7 @@ def main() -> None:
         pca_components=args.pca_components,
         tda_latency_budget_ms=args.tda_budget_ms,
         continuity_weight=args.continuity_weight,
+        continuity_scale=args.continuity_scale,
         lipschitz_weight=args.lipschitz_weight,
         topology_weight=args.topology_weight,
         steering_strength=args.steering_strength,
