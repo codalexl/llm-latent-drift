@@ -372,8 +372,8 @@ def _parse_args() -> argparse.Namespace:
         help="Truncate input prompts to this many tokens. Prevents MPS INT_MAX overflow on long WildChat sessions.",
     )
     parser.add_argument("--risk-threshold", type=float, default=0.95)
-    parser.add_argument("--cosine-floor", type=float, default=0.96)
-    parser.add_argument("--lipschitz-ceiling", type=float, default=0.20)
+    parser.add_argument("--cosine-floor", type=float, default=0.85)
+    parser.add_argument("--lipschitz-ceiling", type=float, default=0.45)
     parser.add_argument("--topology-window", type=int, default=16)
     parser.add_argument("--topology-stride", type=int, default=2)
     parser.add_argument("--topology-diameter-ceiling", type=float, default=1.5)
@@ -385,6 +385,9 @@ def _parse_args() -> argparse.Namespace:
                         help="Divisor applied to raw continuity risk before fusion. "
                              "Raise to bring continuity_risk into the [0,1.5] cap range.")
     parser.add_argument("--lipschitz-weight", type=float, default=0.0)
+    parser.add_argument("--lipschitz-scale", type=float, default=1.0,
+                        help="Divisor applied to raw lipschitz risk before fusion. "
+                             "Matches calibration output lipschitz_scale.")
     parser.add_argument("--topology-weight", type=float, default=1.0)
     parser.add_argument("--steering-strength", type=float, default=0.05)
     parser.add_argument("--repetition-penalty", type=float, default=1.3)
@@ -533,6 +536,7 @@ def main() -> None:
         continuity_weight=args.continuity_weight,
         continuity_scale=args.continuity_scale,
         lipschitz_weight=args.lipschitz_weight,
+        lipschitz_scale=args.lipschitz_scale,
         topology_weight=args.topology_weight,
         steering_strength=args.steering_strength,
         repetition_penalty=args.repetition_penalty,

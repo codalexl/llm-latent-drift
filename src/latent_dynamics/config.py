@@ -167,15 +167,15 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
     },
 }
 
-# Default layer indices when not specified (plan: Llama 20, Qwen3 24, Gemma 18).
+# Default layer indices when not specified (sweep-validated: Llama 16, Gemma3_4b 22, Qwen3 TBD).
 DEFAULT_LAYERS: dict[str, int] = {
-    "llama_3_1_8b": 20,
+    "llama_3_1_8b": 16,
     "llama_3_1_70b": 40,
     "mistral_7b_instruct": 16,
     "gemma2_9b": 20,
     "gemma2_27b": 24,
-    "qwen3_8b": 24,
-    "gemma3_4b": 18,
+    "qwen3_8b": 20,
+    "gemma3_4b": 22,
     "gemma3_12b": 24,
 }
 
