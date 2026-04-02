@@ -308,13 +308,15 @@ def _compute_step_metrics(
         estimated_tda_ms=tda_state.estimated_ms,
     )
     stride_hit = step_idx % max(cfg.topology_stride, 1) == 0 or last_topology is None
-    should_run_tda = cfg.tda_enabled and has_window and within_budget and stride_hit
+    force_tda = bool(getattr(cfg, "force_tda", False))
+    should_run_tda = cfg.tda_enabled and has_window and (force_tda or (within_budget and stride_hit))
     if cfg.tda_enabled and has_window:
         tda_state.attempted += 1
-        if not within_budget:
-            tda_state.skipped_budget += 1
-        elif not stride_hit:
-            tda_state.skipped_stride += 1
+        if not force_tda:
+            if not within_budget:
+                tda_state.skipped_budget += 1
+            elif not stride_hit:
+                tda_state.skipped_stride += 1
 
     if should_run_tda:
         tda_t0 = perf_counter()
@@ -624,13 +626,14 @@ def estimate_safe_reference(
     prompts: list[str],
     device: str,
     layer_idx: int = -1,
+    max_length: int = 512,
 ) -> torch.Tensor:
     """Average last-token hidden states over safe prompts."""
     if not prompts:
         raise ValueError("prompts must be non-empty for safe reference estimation.")
     vectors: list[torch.Tensor] = []
     for prompt in prompts:
-        encoded = tokenizer(prompt, return_tensors="pt")
+        encoded = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=max_length)
         input_ids = encoded["input_ids"].to(device)
         attention_mask = encoded["attention_mask"].to(device)
         with torch.no_grad():

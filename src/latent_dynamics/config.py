@@ -41,6 +41,7 @@ class DriftGuardConfig(BaseModel):
     pca_components: int = Field(default=8, ge=1, le=64)
     reduction_method: str = Field(default="pca", pattern="^(pca|umap|none)$")
     tda_enabled: bool = True
+    force_tda: bool = Field(default=False, description="Bypass stride and budget gates; run TDA on every eligible step.")
     topology_stride: int = Field(
         default=2,
         ge=1,

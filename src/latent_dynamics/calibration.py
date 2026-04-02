@@ -184,7 +184,7 @@ def calibrate_risk_score(
     if safe_prompts_for_reducer:
         safe_states: list[np.ndarray] = []
         for prompt in safe_prompts_for_reducer:
-            encoded = tokenizer(prompt, return_tensors="pt")
+            encoded = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=cfg.max_input_tokens)
             input_ids = encoded["input_ids"].to(device)
             attention_mask = encoded["attention_mask"].to(device)
             with torch.no_grad():
@@ -197,7 +197,7 @@ def calibrate_risk_score(
                 )
             h = out_hidden.hidden_states[cfg.layer_idx]
             if hasattr(h, "detach"):
-                arr = h.detach().squeeze(0).to("cpu").numpy()
+                arr = h.detach().squeeze(0).to("cpu").float().numpy()
             else:
                 arr = np.asarray(h).squeeze(0)
             if arr.ndim == 2 and arr.shape[0] > 0:

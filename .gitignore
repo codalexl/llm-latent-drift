@@ -29,3 +29,11 @@ activations/**/trajectory_shards/**
 
 # >100MB; cannot push to GitHub without LFS
 experiments/outputs/driftguard_proper_gemma3_4b.json
+# Full v2 run exports (JSON/CSV often 100MB+)
+experiments/outputs/driftguard_v2_*.json
+experiments/outputs/driftguard_v2_*.csv
+experiments/outputs/driftguard_proper_v2_*.json
+
+.hypothesis/
+**/.DS_Store
+calibration_safe_trajectories.npy

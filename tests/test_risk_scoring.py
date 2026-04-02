@@ -34,6 +34,7 @@ def test_high_risk_regime_scores_higher() -> None:
 
 
 def test_continuity_and_lipschitz_scales_reduce_component_dominance() -> None:
+    # Use non-zero weights so continuity/lipschitz actually contribute to the score.
     metrics = {
         "cosine_cont": 0.20,
         "lipschitz": 1.20,
@@ -42,10 +43,11 @@ def test_continuity_and_lipschitz_scales_reduce_component_dominance() -> None:
         "beta1": 0,
         "persistence_l1": 0.0,
     }
-    base = compute_risk_score(metrics, DriftGuardConfig())
+    base_cfg = DriftGuardConfig(continuity_weight=0.4, lipschitz_weight=0.3, topology_weight=0.3)
+    base = compute_risk_score(metrics, base_cfg)
     scaled = compute_risk_score(
         metrics,
-        DriftGuardConfig(continuity_scale=20.0, lipschitz_scale=40.0),
+        base_cfg.model_copy(update={"continuity_scale": 20.0, "lipschitz_scale": 40.0}),
     )
     assert scaled < base
 

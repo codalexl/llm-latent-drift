@@ -29,13 +29,14 @@ def _collect_last_hidden_states(
     *,
     layer_idx: int,
     device: str,
+    max_length: int = 512,
 ) -> torch.Tensor:
     if not prompts:
         raise ValueError("prompts must be non-empty.")
 
     states: list[torch.Tensor] = []
     for prompt in prompts:
-        encoded = tokenizer(prompt, return_tensors="pt")
+        encoded = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=max_length)
         input_ids = encoded["input_ids"].to(device)
         attention_mask = encoded["attention_mask"].to(device)
         with torch.no_grad():
@@ -78,6 +79,7 @@ def compute_contrastive_vector(
         prompts=safe_prompts,
         layer_idx=layer_idx,
         device=active_device,
+        max_length=cfg.max_input_tokens,
     )
     harmful_states = _collect_last_hidden_states(
         model=model,
@@ -85,6 +87,7 @@ def compute_contrastive_vector(
         prompts=harmful_prompts,
         layer_idx=layer_idx,
         device=active_device,
+        max_length=cfg.max_input_tokens,
     )
     safe_centroid = safe_states.mean(dim=0)
     harmful_centroid = harmful_states.mean(dim=0)

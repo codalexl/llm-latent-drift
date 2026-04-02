@@ -397,6 +397,12 @@ def _parse_args() -> argparse.Namespace:
         help="Enable contrastive probe blending in risk score (requires trained probe; default: off).",
     )
     parser.add_argument(
+        "--force-tda",
+        action="store_true",
+        default=False,
+        help="Bypass TDA stride and budget gates; run TDA on every eligible step (execution ratio >0.8).",
+    )
+    parser.add_argument(
         "--skip-steer",
         action="store_true",
         default=False,
@@ -532,6 +538,7 @@ def main() -> None:
         repetition_penalty=args.repetition_penalty,
         monitor_warmup_steps=args.monitor_warmup_steps,
         use_contrastive_probe=args.enable_contrastive_probe,
+        force_tda=args.force_tda,
         random_seed=args.seed,
     )
 

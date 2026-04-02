@@ -597,6 +597,13 @@ def calibrate(
     random_seed: Annotated[
         int, typer.Option(help="Reproducible random seed.")
     ] = 42,
+    force_tda: Annotated[
+        bool,
+        typer.Option(
+            "--force-tda/--no-force-tda",
+            help="Bypass TDA stride and budget gates; run TDA on every eligible step.",
+        ),
+    ] = False,
 ) -> None:
     """Calibrate risk threshold/weights against labeled prompts."""
     from latent_dynamics.calibration import calibrate_risk_score
@@ -616,6 +623,7 @@ def calibrate(
         layer_idx=layer_idx,
         max_new_tokens=max_new_tokens,
         random_seed=random_seed,
+        force_tda=force_tda,
         use_nnsight=False,
     )
     result = calibrate_risk_score(
