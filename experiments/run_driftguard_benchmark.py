@@ -357,6 +357,27 @@ def _run_benchmark_seed(
     }
 
 
+def _ablation_fusion_weights(
+    mode: str,
+    continuity: float,
+    lipschitz: float,
+    topology: float,
+) -> tuple[float, float, float]:
+    """Override fusion weights for benchmark ablations (must sum to 1)."""
+    if mode == "none":
+        return continuity, lipschitz, topology
+    if mode == "full":
+        return 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0
+    if mode == "continuity-only":
+        return 1.0, 0.0, 0.0
+    if mode == "topology-only":
+        return 0.0, 0.0, 1.0
+    if mode == "geometry-only":
+        # Continuity + Lipschitz (local smoothness) without topology term.
+        return 0.5, 0.5, 0.0
+    raise ValueError(f"Unknown --ablation mode: {mode!r}")
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run DriftGuard threat presets for reproducible evaluation.",
@@ -394,6 +415,38 @@ def _parse_args() -> argparse.Namespace:
                         help="Divisor applied to raw lipschitz risk before fusion. "
                              "Matches calibration output lipschitz_scale.")
     parser.add_argument("--topology-weight", type=float, default=1.0)
+    # Calibrated topology sub-scales (from calibration JSON recommended_config_update).
+    parser.add_argument(
+        "--topology-diameter-scale",
+        type=float,
+        default=1.0,
+        help="Divisor for raw diameter term (matches topology_diameter_scale in calibration).",
+    )
+    parser.add_argument(
+        "--persistence-l1-scale",
+        type=float,
+        default=1.0,
+        help="Divisor for persistence L1 term (matches persistence_l1_scale in calibration).",
+    )
+    parser.add_argument(
+        "--beta0-scale",
+        type=float,
+        default=1.0,
+        help="Divisor for beta0 term (matches beta0_scale in calibration).",
+    )
+    parser.add_argument(
+        "--beta1-scale",
+        type=float,
+        default=1.0,
+        help="Divisor for beta1 term (matches beta1_scale in calibration).",
+    )
+    parser.add_argument(
+        "--ablation",
+        type=str,
+        default="none",
+        choices=["none", "full", "continuity-only", "topology-only", "geometry-only"],
+        help="Preset for continuity/lipschitz/topology fusion weights (overrides --*-weight when --ablation).",
+    )
     parser.add_argument("--steering-strength", type=float, default=0.05)
     parser.add_argument("--repetition-penalty", type=float, default=1.3)
     parser.add_argument("--monitor-warmup-steps", type=int, default=3,
@@ -525,6 +578,12 @@ def main() -> None:
         raise ValueError(f"--model must be a charter model ({allowed}); got {args.model!r}.")
     _set_seed(args.seed)
     device = resolve_device(args.device)
+    cw, lw, tw = _ablation_fusion_weights(
+        args.ablation,
+        args.continuity_weight,
+        args.lipschitz_weight,
+        args.topology_weight,
+    )
     cfg = DriftGuardConfig(
         layer_idx=args.layer_idx,
         max_new_tokens=args.max_new_tokens,
@@ -538,17 +597,22 @@ def main() -> None:
         topology_beta1_ceiling=args.topology_beta1_ceiling,
         pca_components=args.pca_components,
         tda_latency_budget_ms=args.tda_budget_ms,
-        continuity_weight=args.continuity_weight,
+        continuity_weight=cw,
         continuity_scale=args.continuity_scale,
-        lipschitz_weight=args.lipschitz_weight,
+        lipschitz_weight=lw,
         lipschitz_scale=args.lipschitz_scale,
-        topology_weight=args.topology_weight,
+        topology_weight=tw,
+        topology_diameter_scale=args.topology_diameter_scale,
+        persistence_l1_scale=args.persistence_l1_scale,
+        beta0_scale=args.beta0_scale,
+        beta1_scale=args.beta1_scale,
         steering_strength=args.steering_strength,
         repetition_penalty=args.repetition_penalty,
         monitor_warmup_steps=args.monitor_warmup_steps,
         use_contrastive_probe=args.enable_contrastive_probe,
         force_tda=args.force_tda,
         random_seed=args.seed,
+        ablation_mode=args.ablation,
     )
 
     if args.num_seeds < 1:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
@@ -82,6 +82,13 @@ class DriftGuardConfig(BaseModel):
     nnsight_fail_open: bool = True
     clear_cache_after_steer: bool = False
     random_seed: int | None = None
+    ablation_mode: Literal[
+        "none",
+        "full",
+        "continuity-only",
+        "topology-only",
+        "geometry-only",
+    ] = "none"
 
     @model_validator(mode="after")
     def _validate_weights(self) -> "DriftGuardConfig":
