@@ -91,6 +91,6 @@ def compute_contrastive_vector(
     )
     safe_centroid = safe_states.mean(dim=0)
     harmful_centroid = harmful_states.mean(dim=0)
-    direction = (safe_centroid - harmful_centroid).numpy()
+    direction = (safe_centroid - harmful_centroid).to(torch.float32).cpu().numpy()
     denom = float(np.linalg.norm(direction)) + 1e-8
     return (direction / denom).astype(np.float32)

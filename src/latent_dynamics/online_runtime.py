@@ -176,12 +176,15 @@ def _materialize_proxy(value: object) -> object:
 def _resolve_contrastive_vector(
     cfg: DriftGuardConfig,
     layer_idx: int,
-    contrastive_vectors: dict[str, list[float]] | None = None,
+    contrastive_vectors: dict[str, list[float] | None] | None = None,
 ) -> torch.Tensor | None:
     if contrastive_vectors:
         key = f"layer_{layer_idx}"
         if key in contrastive_vectors:
-            vec = np.asarray(contrastive_vectors[key], dtype=np.float32)
+            raw = contrastive_vectors[key]
+            if raw is None:
+                return None
+            vec = np.asarray(raw, dtype=np.float32)
             if vec.ndim == 1 and vec.size > 0:
                 return torch.as_tensor(vec)
     return None
@@ -673,7 +676,7 @@ def run_driftguard_session(
     cfg: DriftGuardConfig,
     device: str,
     safe_reference: torch.Tensor | None = None,
-    contrastive_vectors: dict[str, list[float]] | None = None,
+    contrastive_vectors: dict[str, list[float] | None] | None = None,
 ) -> DriftSessionResult:
     """Run full online DriftGuard inference loop with optional steering."""
     _set_random_seed(cfg.random_seed)
@@ -880,7 +883,7 @@ def run_driftguard_session_nnsight(
     cfg: DriftGuardConfig,
     device: str,
     safe_reference: torch.Tensor | None = None,
-    contrastive_vectors: dict[str, list[float]] | None = None,
+    contrastive_vectors: dict[str, list[float] | None] | None = None,
 ) -> DriftSessionResult:
     """nnsight-backed online drift loop with cache-aware token stepping.
 

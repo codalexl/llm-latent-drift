@@ -604,6 +604,12 @@ def calibrate(
             help="Bypass TDA stride and budget gates; run TDA on every eligible step.",
         ),
     ] = False,
+    cosine_floor: Annotated[
+        float, typer.Option(help="Cosine continuity floor; steps above this value produce zero continuity risk.")
+    ] = 0.85,
+    lipschitz_ceiling: Annotated[
+        float, typer.Option(help="Lipschitz ceiling; steps below this value produce zero lipschitz risk.")
+    ] = 0.45,
 ) -> None:
     """Calibrate risk threshold/weights against labeled prompts."""
     from latent_dynamics.calibration import calibrate_risk_score
@@ -624,6 +630,8 @@ def calibrate(
         max_new_tokens=max_new_tokens,
         random_seed=random_seed,
         force_tda=force_tda,
+        cosine_floor=cosine_floor,
+        lipschitz_ceiling=lipschitz_ceiling,
         use_nnsight=False,
     )
     result = calibrate_risk_score(

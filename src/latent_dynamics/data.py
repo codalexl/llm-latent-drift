@@ -215,6 +215,41 @@ def _sample_wildchat_non_toxic_sessions(
     return out
 
 
+def load_wildjailbreak_adversarial_harmful(n: int, seed: int = 42) -> list[str]:
+    """WildJailbreak ``adversarial_harmful`` rows as synthetic multi-turn prompts (see hybrid benchmark)."""
+    if n <= 0:
+        return []
+    return _load_wildjailbreak_adversarial_harmful(np.random.default_rng(seed), n)
+
+
+def load_wildchat_benign_multi_turn(n: int, seed: int = 42) -> list[str]:
+    """Non-toxic multi-turn sessions sampled from WildChat-1M (same protocol as hybrid benchmark)."""
+    if n <= 0:
+        return []
+    rng = np.random.default_rng(seed)
+    pool_scan = max(n * 64, 4096)
+    return _sample_wildchat_non_toxic_sessions(rng, n, max_scan=pool_scan)
+
+
+def load_wildchat_multi_turn_preset(
+    max_samples: int = 400,
+    seed: int = 42,
+) -> tuple[list[str], list[int]]:
+    """Half unsafe (WildJailbreak adversarial harmful as multi-turn) and half benign (WildChat-1M).
+
+    Replaces the old silent dummy fallback; prompts and labels are jointly shuffled with ``seed``.
+    """
+    rng = np.random.default_rng(seed)
+    half = max(2, max_samples // 2)
+    pool_scan = max(half * 64, 4096)
+    unsafe = _load_wildjailbreak_adversarial_harmful(rng, half)
+    benign = _sample_wildchat_non_toxic_sessions(rng, half, max_scan=pool_scan)
+    prompts = unsafe + benign
+    labels = [1] * len(unsafe) + [0] * len(benign)
+    idx = rng.permutation(len(prompts))
+    return [prompts[int(i)] for i in idx.tolist()], [labels[int(i)] for i in idx.tolist()]
+
+
 def load_hybrid_wildchat_jailbreak_benchmark_sessions(
     max_cases: int,
     seed: int,
@@ -225,17 +260,8 @@ def load_hybrid_wildchat_jailbreak_benchmark_sessions(
     Class 1: `allenai/wildjailbreak` rows with ``data_type == adversarial_harmful``, adversarial
     column wrapped with a short benign two-turn preamble. Sessions and labels are shuffled together.
     """
-    rng = np.random.default_rng(seed)
-    half = max(2, max_cases // 2)
-    pool_scan = max(half * 64, 4096)
-
-    unsafe_texts = _load_wildjailbreak_adversarial_harmful(rng, half)
-    benign_texts = _sample_wildchat_non_toxic_sessions(rng, half, max_scan=pool_scan)
-
-    texts = unsafe_texts + benign_texts
-    labels = np.array([1] * len(unsafe_texts) + [0] * len(benign_texts), dtype=np.int64)
-    perm = rng.permutation(len(texts))
-    return [texts[int(i)] for i in perm.tolist()], labels[perm]
+    texts, labels = load_wildchat_multi_turn_preset(max_cases, seed)
+    return texts, np.array(labels, dtype=np.int64)
 
 
 def _format_wildchat_1m_session(conversation: list[Any]) -> str:

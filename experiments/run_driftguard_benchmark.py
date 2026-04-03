@@ -275,6 +275,11 @@ def _run_benchmark_seed(
     steer_rows: list[dict[str, Any]] = []
 
     for case_idx, case in enumerate(cases):
+        if case_idx < 3:  # print first 3 sessions only
+            print(f"\n=== SESSION {case_idx} (label={case.unsafe_label}) ===")
+            print(f"INPUT PROMPT (first 300 chars): {case.prompt[:300]}...")
+            print(f"EXPECTED UNSAFE: {case.unsafe_label == 1}")
+
         # Each case gets a unique but deterministic seed derived from the global
         # seed and its position in the shuffled case list. Using the global seed
         # for every case collapsed all sessions to the same RNG state.

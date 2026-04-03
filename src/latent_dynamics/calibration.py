@@ -412,7 +412,9 @@ def calibrate_risk_score(
     }
     safe_prompts = cfg.safe_prompts or [p for p, y_i in zip(prompts, labels) if int(y_i) == 0]
     harmful_prompts = cfg.harmful_prompts or [p for p, y_i in zip(prompts, labels) if int(y_i) != 0]
+    layer_key = f"layer_{cfg.layer_idx}"
     if safe_prompts and harmful_prompts:
+        contrastive_vectors: dict[str, list[float] | None] = {}
         try:
             vec = compute_contrastive_vector(
                 model=model,
@@ -423,11 +425,11 @@ def calibrate_risk_score(
                 cfg=cfg,
                 device=device,
             )
-            result["contrastive_vectors"] = {f"layer_{cfg.layer_idx}": vec.astype(float).tolist()}
-        except Exception:
-            # Keep calibration usable even if vector extraction fails for a backend.
-            logger.warning("Contrastive vector extraction failed during calibration.", exc_info=True)
-            result["contrastive_vectors"] = {}
+            contrastive_vectors[layer_key] = vec.astype(float).tolist()
+        except Exception as e:
+            print(f"⚠️  Contrastive vector extraction failed for layer {cfg.layer_idx}: {e}")
+            contrastive_vectors[layer_key] = None
+        result["contrastive_vectors"] = contrastive_vectors
     else:
         result["contrastive_vectors"] = {}
     out.write_text(json.dumps(result, indent=2))
