@@ -67,26 +67,43 @@ uv run latent-dynamics calibrate \
 This command now performs a label-driven search over risk weights, topology scales, and threshold, then writes recommended config updates plus ROC/PR curves.
 
 ### 6) Generate benchmark figures
+Single export:
 ```bash
 uv run python experiments/plot_driftguard_benchmark.py \
-  --report-json experiments/outputs/driftguard_benchmark.json \
-  --activations activations/wildchat/gemma3_4b/layer_18 \
+  --report-json experiments/outputs/driftguard_benchmark_qwen.json \
   --out-dir experiments/outputs/figures
 ```
 
+Multi-model (recommended): reads every `driftguard_benchmark*.json` in the folder, writes **per-model** figures (`*_qwen.png`, `*_gemma.png`, …) plus **`driftguard_roc_combined_fused.png`** and **`driftguard_ablation_cross_model.png`**.
+```bash
+uv run python experiments/plot_driftguard_benchmark.py \
+  --input-dir experiments/outputs \
+  --output-dir experiments/outputs/figures
+```
+
 ### 7) Generate paper-ready Results section
+Single export:
 ```bash
 uv run python experiments/generate_results_markdown.py \
-  --report-json experiments/outputs/driftguard_benchmark.json \
+  --report-json experiments/outputs/driftguard_benchmark_qwen.json \
   --output-md experiments/outputs/driftguard_results_section.md \
   --replace-paper-section
 ```
 
+Combined Results (Qwen + Gemma + Llama):
+```bash
+uv run python experiments/generate_results_markdown.py \
+  --input-dir experiments/outputs \
+  --output experiments/outputs/driftguard_results_section.md
+```
+
+The generated markdown is also suitable to paste into the arXiv preprint (`paper/driftguard_preprint.md`) or to replace Section 6 with `--replace-paper-section` when using a single `--report-json`.
+
 ## Main outputs
 
-- `experiments/outputs/driftguard_benchmark.json`
-- `experiments/outputs/driftguard_baseline_table.csv`
-- `experiments/outputs/figures/` (cosine heatmap, lead-time distribution, latency bar, ablation ROC, optional PCA/persistence)
+- `experiments/outputs/driftguard_benchmark_*.json` (per-model calibrated runs)
+- `experiments/outputs/driftguard_baseline_table.csv` (when exported by the benchmark script)
+- `experiments/outputs/figures/` — ROC (`driftguard_roc_mean_session_<model>.png`, `driftguard_roc_combined_fused.png`), ablation per model and cross-model (`driftguard_ablation_auroc_<model>.png`, `driftguard_ablation_cross_model.png`), lead time / latency / cosine heatmap / per-seed stability / example persistence traces (suffix `_qwen`, `_gemma`, `_llama` in multi-model mode)
 - `experiments/outputs/driftguard_results_section.md`
 - `activations/{dataset}/{model}/layer_{N}/` (trajectory shards + metadata)
 

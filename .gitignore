@@ -37,3 +37,8 @@ experiments/outputs/driftguard_proper_v2_*.json
 .hypothesis/
 **/.DS_Store
 calibration_safe_trajectories.npy
+
+# Large multi-seed benchmark exports (optional — keep local; avoid accidental 100MB+ commits)
+experiments/outputs/driftguard_benchmark_qwen.json
+experiments/outputs/driftguard_benchmark_gemma.json
+experiments/outputs/driftguard_benchmark_llama.json
