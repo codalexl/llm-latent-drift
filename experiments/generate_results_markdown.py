@@ -326,6 +326,7 @@ def _render_multi_model_section(paths: list[Path], payloads: list[dict[str, Any]
         "the fused score remains higher—continuity/dynamics terms provide the usable discrimination.",
         "- **Llama-3.1-8B** is intermediate: topology-only AUROC is well above chance but still trails the fused score.",
         "- **Overall scale:** fused mean-session AUROC spans roughly **0.65–0.72** on this benchmark; Qwen is the only backbone where topology alone matches the full fused detector.",
+        "- **Gemma nuance:** on `gemma3_4b`, **continuity-only** mean-session AUROC in the ablation table **exceeds** the fused score, so the scalar fusion weights are not aligning with the best single component on this backbone (topology is weak and the fixed blend does not recover continuity’s standalone ranking power).",
         "",
         "### 6.3 Verification checklist (automated from JSON)",
         "",
